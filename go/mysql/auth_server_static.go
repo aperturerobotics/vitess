@@ -18,26 +18,10 @@ package mysql
 
 import (
 	"bytes"
-	"encoding/json"
-	"flag"
-	"io/ioutil"
 	"net"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
-	"time"
 
-	"github.com/dolthub/vitess/go/vt/log"
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
-	"github.com/dolthub/vitess/go/vt/proto/vtrpc"
-	"github.com/dolthub/vitess/go/vt/vterrors"
-)
-
-var (
-	mysqlAuthServerStaticFile           = flag.String("mysql_auth_server_static_file", "", "JSON File to read the users/passwords from.")
-	mysqlAuthServerStaticString         = flag.String("mysql_auth_server_static_string", "", "JSON representation of the users/passwords config.")
-	mysqlAuthServerStaticReloadInterval = flag.Duration("mysql_auth_static_reload_interval", 0, "Ticker to reload credentials")
 )
 
 const (
@@ -78,136 +62,12 @@ type AuthServerStaticEntry struct {
 	Groups              []string
 }
 
-// InitAuthServerStatic Handles initializing the AuthServerStatic if necessary.
-func InitAuthServerStatic() {
-	// Check parameters.
-	if *mysqlAuthServerStaticFile == "" && *mysqlAuthServerStaticString == "" {
-		// Not configured, nothing to do.
-		log.Infof("Not configuring AuthServerStatic, as mysql_auth_server_static_file and mysql_auth_server_static_string are empty")
-		return
-	}
-	if *mysqlAuthServerStaticFile != "" && *mysqlAuthServerStaticString != "" {
-		// Both parameters specified, can only use one.
-		log.Exitf("Both mysql_auth_server_static_file and mysql_auth_server_static_string specified, can only use one.")
-	}
-
-	// Create and register auth server.
-	RegisterAuthServerStaticFromParams(*mysqlAuthServerStaticFile, *mysqlAuthServerStaticString)
-}
-
 // NewAuthServerStatic returns a new empty AuthServerStatic.
 func NewAuthServerStatic() *AuthServerStatic {
 	return &AuthServerStatic{
 		Method:  MysqlNativePassword,
 		Entries: make(map[string][]*AuthServerStaticEntry),
 	}
-}
-
-// RegisterAuthServerStaticFromParams creates and registers a new
-// AuthServerStatic, loaded for a JSON file or string. If file is set,
-// it uses file. Otherwise, load the string. It log.Exits out in case
-// of error.
-func RegisterAuthServerStaticFromParams(file, str string) {
-	authServerStatic := NewAuthServerStatic()
-
-	authServerStatic.loadConfigFromParams(file, str)
-
-	if len(authServerStatic.Entries) <= 0 {
-		log.Exitf("Failed to populate entries from file: %v", file)
-	}
-	authServerStatic.installSignalHandlers()
-
-	// And register the server.
-	RegisterAuthServerImpl("static", authServerStatic)
-}
-
-func (a *AuthServerStatic) loadConfigFromParams(file, str string) {
-	jsonConfig := []byte(str)
-	if file != "" {
-		data, err := ioutil.ReadFile(file)
-		if err != nil {
-			log.Errorf("Failed to read mysql_auth_server_static_file file: %v", err)
-			return
-		}
-		jsonConfig = data
-	}
-
-	entries := make(map[string][]*AuthServerStaticEntry)
-	if err := parseConfig(jsonConfig, &entries); err != nil {
-		log.Errorf("Error parsing auth server config: %v", err)
-		return
-	}
-
-	a.mu.Lock()
-	a.Entries = entries
-	a.mu.Unlock()
-}
-
-func (a *AuthServerStatic) installSignalHandlers() {
-	if *mysqlAuthServerStaticFile == "" {
-		return
-	}
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGHUP)
-	go func() {
-		for range sigChan {
-			a.loadConfigFromParams(*mysqlAuthServerStaticFile, "")
-		}
-	}()
-
-	// If duration is set, it will reload configuration every interval
-	if *mysqlAuthServerStaticReloadInterval > 0 {
-		ticker := time.NewTicker(*mysqlAuthServerStaticReloadInterval)
-		go func() {
-			for {
-				select {
-				case <-ticker.C:
-					if *mysqlAuthServerStaticReloadInterval <= 0 {
-						ticker.Stop()
-						return
-					}
-					sigChan <- syscall.SIGHUP
-				}
-			}
-		}()
-	}
-}
-
-func parseConfig(jsonConfig []byte, config *map[string][]*AuthServerStaticEntry) error {
-	decoder := json.NewDecoder(bytes.NewReader(jsonConfig))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(config); err != nil {
-		// Couldn't parse, will try to parse with legacy config
-		return parseLegacyConfig(jsonConfig, config)
-	}
-	return validateConfig(*config)
-}
-
-func parseLegacyConfig(jsonConfig []byte, config *map[string][]*AuthServerStaticEntry) error {
-	// legacy config doesn't have an array
-	legacyConfig := make(map[string]*AuthServerStaticEntry)
-	decoder := json.NewDecoder(bytes.NewReader(jsonConfig))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&legacyConfig); err != nil {
-		return err
-	}
-	log.Warningf("Config parsed using legacy configuration. Please update to the latest format: {\"user\":[{\"Password\": \"xxx\"}, ...]}")
-	for key, value := range legacyConfig {
-		(*config)[key] = append((*config)[key], value)
-	}
-	return nil
-}
-
-func validateConfig(config map[string][]*AuthServerStaticEntry) error {
-	for _, entries := range config {
-		for _, entry := range entries {
-			if entry.SourceHost != "" && entry.SourceHost != localhostName {
-				return vterrors.Errorf(vtrpc.Code_INVALID_ARGUMENT, "invalid SourceHost found (only localhost is supported): %v", entry.SourceHost)
-			}
-		}
-	}
-	return nil
 }
 
 // AuthMethod is part of the AuthServer interface.

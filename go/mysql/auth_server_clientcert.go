@@ -22,7 +22,19 @@ import (
 	"net"
 
 	"github.com/dolthub/vitess/go/vt/log"
+	querypb "github.com/dolthub/vitess/go/vt/proto/query"
 )
+
+// StaticUserData holds the username and groups
+type StaticUserData struct {
+	username string
+	groups   []string
+}
+
+// Get returns the wrapped username and groups
+func (sud *StaticUserData) Get() *querypb.VTGateCallerID {
+	return &querypb.VTGateCallerID{Username: sud.username, Groups: sud.groups}
+}
 
 var clientcertAuthMethod = flag.String("mysql_clientcert_auth_method", MysqlClearPassword, "client-side authentication method to use. Supported values: mysql_clear_password, dialog.")
 

@@ -17,16 +17,13 @@ limitations under the License.
 package mysql
 
 import (
-	"crypto/tls"
 	"io"
 	"net"
 	"strings"
 	"time"
 
-	"github.com/dolthub/vitess/go/netutil"
 	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/dolthub/vitess/go/stats"
-	"github.com/dolthub/vitess/go/sync2"
 	"github.com/dolthub/vitess/go/tb"
 	"github.com/dolthub/vitess/go/vt/log"
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
@@ -40,31 +37,15 @@ const (
 	DefaultServerVersion = "5.7.9-Vitess"
 
 	// timing metric keys
-	connectTimingKey  = "Connect"
-	queryTimingKey    = "Query"
-	versionTLS10      = "TLS10"
-	versionTLS11      = "TLS11"
-	versionTLS12      = "TLS12"
-	versionTLSUnknown = "UnknownTLSVersion"
-	versionNoTLS      = "None"
+	connectTimingKey = "Connect"
+	queryTimingKey   = "Query"
 )
 
 var (
 	// Metrics
 	timings    = stats.NewTimings("MysqlServerTimings", "MySQL server timings", "operation")
-	connCount  = stats.NewGauge("MysqlServerConnCount", "Active MySQL server connections")
 	connAccept = stats.NewCounter("MysqlServerConnAccepted", "Connections accepted by MySQL server")
 	connSlow   = stats.NewCounter("MysqlServerConnSlow", "Connections that took more than the configured mysql_slow_connect_warn_threshold to establish")
-
-	connCountByTLSVer = stats.NewGaugesWithSingleLabel("MysqlServerConnCountByTLSVer", "Active MySQL server connections by TLS version", "tls")
-	connCountPerUser  = stats.NewGaugesWithSingleLabel("MysqlServerConnCountPerUser", "Active MySQL server connections per user", "count")
-	_                 = stats.NewGaugeFunc("MysqlServerConnCountUnauthenticated", "Active MySQL server connections that haven't authenticated yet", func() int64 {
-		totalUsers := int64(0)
-		for _, v := range connCountPerUser.Counts() {
-			totalUsers += v
-		}
-		return connCount.Get() - totalUsers
-	})
 )
 
 // A Handler is an interface used by Listener to send queries.
@@ -126,12 +107,6 @@ type Listener struct {
 	// handler is the data handler.
 	handler Handler
 
-	// This is the main listener socket.
-	listener net.Listener
-
-	// Max limit for connections
-	maxConns uint64
-
 	// The following parameters are read by multiple connection go
 	// routines.  They are not protected by a mutex, so they
 	// should be set after NewListener, and not changed while
@@ -140,139 +115,26 @@ type Listener struct {
 	// ServerVersion is the version we will advertise.
 	ServerVersion string
 
-	// TLSConfig is the server TLS config. If set, we will advertise
-	// that we support SSL.
-	TLSConfig *tls.Config
-
-	// AllowClearTextWithoutTLS needs to be set for the
-	// mysql_clear_password authentication method to be accepted
-	// by the server when TLS is not in use.
-	AllowClearTextWithoutTLS bool
-
 	// SlowConnectWarnThreshold if non-zero specifies an amount of time
 	// beyond which a warning is logged to identify the slow connection
 	SlowConnectWarnThreshold time.Duration
-
-	// The following parameters are changed by the Accept routine.
-
-	// Incrementing ID for connection id.
-	connectionID uint32
-
-	// Read timeout on a given connection
-	connReadTimeout time.Duration
-	// Write timeout on a given connection
-	connWriteTimeout time.Duration
-	// connReadBufferSize is size of buffer for reads from underlying connection.
-	// Reads are unbuffered if it's <=0.
-	connReadBufferSize int
-
-	// shutdown indicates that Shutdown method was called.
-	shutdown sync2.AtomicBool
 
 	// RequireSecureTransport configures the server to reject connections from insecure clients
 	RequireSecureTransport bool
 }
 
-// NewFromListener creates a new mysql listener from an existing net.Listener
-func NewFromListener(l net.Listener, authServer AuthServer, handler Handler, connReadTimeout time.Duration, connWriteTimeout time.Duration) (*Listener, error) {
-	cfg := ListenerConfig{
-		Listener:           l,
-		AuthServer:         authServer,
-		Handler:            handler,
-		ConnReadTimeout:    connReadTimeout,
-		ConnWriteTimeout:   connWriteTimeout,
-		ConnReadBufferSize: DefaultConnBufferSize,
-	}
-	return NewListenerWithConfig(cfg)
-}
-
 // NewListener creates a new Listener.
-func NewListener(protocol, address string, authServer AuthServer, handler Handler, connReadTimeout time.Duration, connWriteTimeout time.Duration) (*Listener, error) {
-	listener, err := net.Listen(protocol, address)
-	if err != nil {
-		return nil, err
-	}
-
-	return NewFromListener(listener, authServer, handler, connReadTimeout, connWriteTimeout)
-}
-
-// ListenerConfig should be used with NewListenerWithConfig to specify listener parameters.
-type ListenerConfig struct {
-	// Protocol-Address pair and Listener are mutually exclusive parameters
-	Protocol           string
-	Address            string
-	Listener           net.Listener
-	AuthServer         AuthServer
-	Handler            Handler
-	ConnReadTimeout    time.Duration
-	ConnWriteTimeout   time.Duration
-	ConnReadBufferSize int
-	MaxConns           uint64
-}
-
-// NewListenerWithConfig creates new listener using provided config. There are
-// no default values for config, so caller should ensure its correctness.
-func NewListenerWithConfig(cfg ListenerConfig) (*Listener, error) {
-	var l net.Listener
-	if cfg.Listener != nil {
-		l = cfg.Listener
-	} else {
-		listener, err := net.Listen(cfg.Protocol, cfg.Address)
-		if err != nil {
-			return nil, err
-		}
-		l = listener
-	}
-
+func NewListener(authServer AuthServer, handler Handler) (*Listener, error) {
 	return &Listener{
-		authServer:         cfg.AuthServer,
-		handler:            cfg.Handler,
-		listener:           l,
-		ServerVersion:      DefaultServerVersion,
-		connectionID:       1,
-		connReadTimeout:    cfg.ConnReadTimeout,
-		connWriteTimeout:   cfg.ConnWriteTimeout,
-		connReadBufferSize: cfg.ConnReadBufferSize,
-		maxConns:           cfg.MaxConns,
+		authServer:    authServer,
+		handler:       handler,
+		ServerVersion: DefaultServerVersion,
 	}, nil
 }
 
-// Addr returns the listener address.
-func (l *Listener) Addr() net.Addr {
-	return l.listener.Addr()
-}
-
-// Accept runs an accept loop until the listener is closed.
-func (l *Listener) Accept() {
-	for {
-		conn, err := l.listener.Accept()
-		if err != nil {
-			// Close() was probably called.
-			return
-		}
-
-		acceptTime := time.Now()
-
-		connectionID := l.connectionID
-		l.connectionID++
-
-		for l.maxConns > 0 && uint64(connCount.Get()) >= l.maxConns {
-			// TODO: make this behavior configurable (wait v. reject)
-			time.Sleep(500 * time.Millisecond)
-		}
-
-		connCount.Add(1)
-		connAccept.Add(1)
-		go l.handle(conn, connectionID, acceptTime)
-	}
-}
-
-// handle is called in a go routine for each client connection.
+// HandleConn is called in a go routine for each client connection.
 // FIXME(alainjobart) handle per-connection logs in a way that makes sense.
-func (l *Listener) handle(conn net.Conn, connectionID uint32, acceptTime time.Time) {
-	if l.connReadTimeout != 0 || l.connWriteTimeout != 0 {
-		conn = netutil.NewConnWithTimeouts(conn, l.connReadTimeout, l.connWriteTimeout)
-	}
+func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime time.Time) {
 	c := newServerConn(conn, l)
 	c.ConnectionID = connectionID
 
@@ -292,11 +154,8 @@ func (l *Listener) handle(conn net.Conn, connectionID uint32, acceptTime time.Ti
 	l.handler.NewConnection(c)
 	defer l.handler.ConnectionClosed(c)
 
-	// Adjust the count of open connections
-	defer connCount.Add(-1)
-
 	// First build and send the server handshake packet.
-	salt, err := c.writeHandshakeV10(l.ServerVersion, l.authServer, l.TLSConfig != nil)
+	salt, err := c.writeHandshakeV10(l.ServerVersion, l.authServer)
 	if err != nil {
 		if err != io.EOF {
 			log.Errorf("Cannot send HandshakeV10 packet to %s: %v", c, err)
@@ -304,8 +163,7 @@ func (l *Listener) handle(conn net.Conn, connectionID uint32, acceptTime time.Ti
 		return
 	}
 
-	// Wait for the client response. This has to be a direct read,
-	// so we don't buffer the TLS negotiation packets.
+	// Wait for the client response.
 	response, err := c.readEphemeralPacketDirect()
 	if err != nil {
 		// Don't log EOF errors. They cause too much spam, same as main read loop.
@@ -337,21 +195,12 @@ func (l *Listener) handle(conn net.Conn, connectionID uint32, acceptTime time.Ti
 			return
 		}
 		c.recycleReadPacket()
-
-		if con, ok := c.Conn.(*tls.Conn); ok {
-			connState := con.ConnectionState()
-			tlsVerStr := tlsVersionToString(connState.Version)
-			if tlsVerStr != "" {
-				connCountByTLSVer.Add(tlsVerStr, 1)
-				defer connCountByTLSVer.Add(tlsVerStr, -1)
-			}
-		}
 	} else {
-		if l.RequireSecureTransport {
-			c.writeErrorPacketFromError(vterrors.Errorf(vtrpc.Code_UNAVAILABLE, "server does not allow insecure connections, client must use SSL/TLS"))
-		}
-		connCountByTLSVer.Add(versionNoTLS, 1)
-		defer connCountByTLSVer.Add(versionNoTLS, -1)
+		/*
+			if l.RequireSecureTransport {
+				c.writeErrorPacketFromError(vterrors.Errorf(vtrpc.Code_UNAVAILABLE, "server does not allow insecure connections, client must use SSL/TLS"))
+			}
+		*/
 	}
 
 	// See what auth method the AuthServer wants to use for that user.
@@ -410,13 +259,6 @@ func (l *Listener) handle(conn net.Conn, connectionID uint32, acceptTime time.Ti
 
 	default:
 		// The server wants to use something else, re-negotiate.
-
-		// The negotiation happens in clear text. Let's check we can.
-		if !l.AllowClearTextWithoutTLS && c.Capabilities&CapabilityClientSSL == 0 {
-			c.writeErrorPacket(CRServerHandshakeErr, SSUnknownSQLState, "Cannot use clear text authentication over non-SSL connections.")
-			return
-		}
-
 		// Switch our auth method to what the server wants.
 		// Dialog plugin expects an AskPassword prompt.
 		var data []byte
@@ -437,11 +279,6 @@ func (l *Listener) handle(conn net.Conn, connectionID uint32, acceptTime time.Ti
 		}
 		c.User = user
 		c.UserData = userData
-	}
-
-	if c.User != "" {
-		connCountPerUser.Add(c.User, 1)
-		defer connCountPerUser.Add(c.User, -1)
 	}
 
 	// Set db name.
@@ -476,26 +313,9 @@ func (l *Listener) handle(conn net.Conn, connectionID uint32, acceptTime time.Ti
 	}
 }
 
-// Close stops the listener, which prevents accept of any new connections. Existing connections won't be closed.
-func (l *Listener) Close() {
-	l.listener.Close()
-}
-
-// Shutdown closes listener and fails any Ping requests from existing connections.
-// This can be used for graceful shutdown, to let clients know that they should reconnect to another server.
-func (l *Listener) Shutdown() {
-	if l.shutdown.CompareAndSwap(false, true) {
-		l.Close()
-	}
-}
-
-func (l *Listener) isShutdown() bool {
-	return l.shutdown.Get()
-}
-
 // writeHandshakeV10 writes the Initial Handshake Packet, server side.
 // It returns the salt data.
-func (c *Conn) writeHandshakeV10(serverVersion string, authServer AuthServer, enableTLS bool) ([]byte, error) {
+func (c *Conn) writeHandshakeV10(serverVersion string, authServer AuthServer) ([]byte, error) {
 	capabilities := CapabilityClientLongPassword |
 		CapabilityClientLongFlag |
 		CapabilityClientConnectWithDB |
@@ -510,9 +330,11 @@ func (c *Conn) writeHandshakeV10(serverVersion string, authServer AuthServer, en
 		CapabilityClientConnAttr |
 		CapabilityClientFoundRows |
 		CapabilityClientLocalFiles
-	if enableTLS {
-		capabilities |= CapabilityClientSSL
-	}
+	/*
+		if enableTLS {
+			capabilities |= CapabilityClientSSL
+		}
+	*/
 
 	length :=
 		1 + // protocol version
@@ -640,16 +462,6 @@ func (l *Listener) parseClientHandshakePacket(c *Conn, firstTime bool, data []by
 
 	// 23x reserved zero bytes.
 	pos += 23
-
-	// Check for SSL.
-	if firstTime && l.TLSConfig != nil && clientFlags&CapabilityClientSSL > 0 {
-		// Need to switch to TLS, and then re-read the packet.
-		conn := tls.Server(c.Conn, l.TLSConfig)
-		c.Conn = conn
-		c.bufferedReader.Reset(conn)
-		c.Capabilities |= CapabilityClientSSL
-		return "", "", nil, nil
-	}
 
 	// username
 	username, pos, ok := readNullString(data, pos)
@@ -793,18 +605,4 @@ func (c *Conn) writeAuthSwitchRequest(pluginName string, pluginData []byte) erro
 		return vterrors.Errorf(vtrpc.Code_INTERNAL, "error building AuthSwitchRequestPacket packet: got %v bytes expected %v", pos, len(data))
 	}
 	return c.writeEphemeralPacket()
-}
-
-// Whenever we move to a new version of go, we will need add any new supported TLS versions here
-func tlsVersionToString(version uint16) string {
-	switch version {
-	case tls.VersionTLS10:
-		return versionTLS10
-	case tls.VersionTLS11:
-		return versionTLS11
-	case tls.VersionTLS12:
-		return versionTLS12
-	default:
-		return versionTLSUnknown
-	}
 }

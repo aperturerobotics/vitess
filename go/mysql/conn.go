@@ -154,7 +154,6 @@ type Conn struct {
 	DisableClientMultiStatements bool
 
 	// Packet encoding variables.
-	bufferedReader *bufio.Reader
 	bufferedWriter *bufio.Writer
 	sequence       uint8
 
@@ -228,16 +227,12 @@ type PrepareData struct {
 // bufPool is used to allocate and free buffers in an efficient way.
 var bufPool = bucketpool.New(DefaultConnBufferSize, MaxPacketSize)
 
-// writersPool is used for pooling bufio.Writer objects.
-var writersPool = sync.Pool{New: func() interface{} { return bufio.NewWriterSize(nil, DefaultConnBufferSize) }}
-
 // newConn is an internal method to create a Conn. Used by client and server
 // side for common creation code.
 func newConn(conn net.Conn) *Conn {
 	return &Conn{
-		Conn:           conn,
-		closed:         sync2.NewAtomicBool(false),
-		bufferedReader: bufio.NewReaderSize(conn, DefaultConnBufferSize),
+		Conn:   conn,
+		closed: sync2.NewAtomicBool(false),
 	}
 }
 
@@ -253,16 +248,13 @@ func newServerConn(conn net.Conn, listener *Listener) *Conn {
 		closed:      sync2.NewAtomicBool(false),
 		PrepareData: make(map[uint32]*PrepareData),
 	}
-	if listener.connReadBufferSize > 0 {
-		c.bufferedReader = bufio.NewReaderSize(conn, listener.connReadBufferSize)
-	}
 	return c
 }
 
 // startWriterBuffering starts using buffered writes. This should
 // be terminated by a call to flush.
 func (c *Conn) startWriterBuffering() {
-	c.bufferedWriter = writersPool.Get().(*bufio.Writer)
+	c.bufferedWriter = bufio.NewWriterSize(nil, DefaultConnBufferSize)
 	c.bufferedWriter.Reset(c.Conn)
 }
 
@@ -275,7 +267,6 @@ func (c *Conn) flush() error {
 
 	defer func() {
 		c.bufferedWriter.Reset(nil)
-		writersPool.Put(c.bufferedWriter)
 		c.bufferedWriter = nil
 	}()
 
@@ -294,9 +285,6 @@ func (c *Conn) getWriter() io.Writer {
 // getReader returns reader for connection. It can be *bufio.Reader or net.Conn
 // depending on which buffer size was passed to newServerConn.
 func (c *Conn) getReader() io.Reader {
-	if c.bufferedReader != nil {
-		return c.bufferedReader
-	}
 	return c.Conn
 }
 
@@ -1023,17 +1011,9 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 		}
 	case ComPing:
 		c.recycleReadPacket()
-		// Return error if listener was shut down and OK otherwise
-		if c.listener.isShutdown() {
-			if err := c.writeErrorPacket(ERServerShutdown, SSServerShutdown, "Server shutdown in progress"); err != nil {
-				log.Errorf("Error writing ComPing error to %s: %v", c, err)
-				return err
-			}
-		} else {
-			if err := c.writeOKPacket(0, 0, c.StatusFlags, 0); err != nil {
-				log.Errorf("Error writing ComPing result to %s: %v", c, err)
-				return err
-			}
+		if err := c.writeOKPacket(0, 0, c.StatusFlags, 0); err != nil {
+			log.Errorf("Error writing ComPing result to %s: %v", c, err)
+			return err
 		}
 	case ComSetOption:
 		operation, ok := c.parseComSetOption(data)

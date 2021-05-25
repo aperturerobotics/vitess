@@ -293,7 +293,6 @@ func (c *Conn) clientHandshake(params *ConnParams) error {
 
 		conn := tlsConn
 		c.Conn = conn
-		c.bufferedReader.Reset(conn)
 		c.Capabilities |= CapabilityClientSSL
 	}
 

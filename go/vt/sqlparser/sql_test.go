@@ -2,6 +2,7 @@ package sqlparser
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -320,6 +321,24 @@ func TestDropIndex(t *testing.T) {
 		},
 	}
 	testIndex(t, tests)
+}
+
+// TestShowTablePrepared tests that Vitess can correctly walk all the SQLVal instances
+// in a parsed SHOW TABLES statement to identify the bound variables.
+func TestShowTablePrepared(t *testing.T) {
+	statement, err := Parse("SHOW TABLES FROM `mydb` WHERE `Tables_in_mydb` = ?")
+	require.NoError(t, err)
+	paramsCount := uint16(0)
+	_ = Walk(func(node SQLNode) (bool, error) {
+		switch node := node.(type) {
+		case *SQLVal:
+			if strings.HasPrefix(string(node.Val), ":v") {
+				paramsCount++
+			}
+		}
+		return true, nil
+	}, statement)
+	assert.Equal(t, uint16(1), paramsCount)
 }
 
 func TestShowIndex(t *testing.T) {
@@ -678,7 +697,7 @@ func TestAlterDropConstraint(t *testing.T) {
 			require.NoError(t, err)
 			ddlRes, ok := res.(*DDL)
 			if !ok {
-				mAlterDDL, ok := res.(*MultiAlterDDL)
+				mAlterDDL, ok := res.(*AlterTable)
 				require.True(t, ok)
 				require.Len(t, mAlterDDL.Statements, 1)
 				ddlRes = mAlterDDL.Statements[0]
@@ -708,7 +727,7 @@ func testIndex(t *testing.T, tests []testIndexStruct) {
 			require.NoError(t, err)
 			ddlRes, ok := res.(*DDL)
 			if !ok {
-				mAlterDDL, ok := res.(*MultiAlterDDL)
+				mAlterDDL, ok := res.(*AlterTable)
 				require.True(t, ok)
 				require.Len(t, mAlterDDL.Statements, 1)
 				ddlRes = mAlterDDL.Statements[0]
@@ -732,7 +751,7 @@ func testForeignKey(t *testing.T, tests []testForeignKeyStruct, expectedConstrai
 			require.NoError(t, err)
 			ddlRes, ok := res.(*DDL)
 			if !ok {
-				mAlterDDL, ok := res.(*MultiAlterDDL)
+				mAlterDDL, ok := res.(*AlterTable)
 				require.True(t, ok)
 				require.Len(t, mAlterDDL.Statements, 1)
 				ddlRes = mAlterDDL.Statements[0]

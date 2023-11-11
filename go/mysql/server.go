@@ -29,13 +29,14 @@ import (
 	"github.com/dolthub/vitess/go/vt/log"
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
 	"github.com/dolthub/vitess/go/vt/proto/vtrpc"
+	"github.com/dolthub/vitess/go/vt/sqlparser"
 	"github.com/dolthub/vitess/go/vt/vterrors"
 )
 
 const (
 	// DefaultServerVersion is the default server version we're sending to the client.
 	// Can be changed.
-	DefaultServerVersion = "5.7.9-Vitess"
+	DefaultServerVersion = "8.0.33"
 
 	// timing metric keys
 	connectTimingKey = "Connect"
@@ -80,6 +81,13 @@ type Handler interface {
 	// hang on to the byte slice.
 	ComQuery(c *Conn, query string, callback func(res *sqltypes.Result, more bool) error) error
 
+	// ComParsedQuery is called when a connection receives a
+	// query that has already been parsed. Note the contents
+	// of the query slice may change after the first call to
+	// callback. So the Handler should not hang on to the byte
+	// slice.
+	ComParsedQuery(c *Conn, query string, parsed sqlparser.Statement, callback func(res *sqltypes.Result, more bool) error) error
+
 	// ComMultiQuery is called when a connection receives a query and the
 	// client supports MULTI_STATEMENT. It should process the first
 	// statement in |query| and return the remainder. It will be called
@@ -88,7 +96,7 @@ type Handler interface {
 
 	// ComPrepare is called when a connection receives a prepared
 	// statement query.
-	ComPrepare(c *Conn, query string) ([]*querypb.Field, error)
+	ComPrepare(c *Conn, query string, prepare *PrepareData) ([]*querypb.Field, error)
 
 	// ComStmtExecute is called when a connection receives a statement
 	// execute query.
@@ -102,6 +110,13 @@ type Handler interface {
 	WarningCount(c *Conn) uint16
 
 	ComResetConnection(c *Conn)
+
+	// ParserOptionsForConnection returns any parser options that should be used for the given connection. For
+	// example, if the connection has enabled ANSI_QUOTES or ANSI SQL_MODE, then the parser needs to know that
+	// in order to parse queries correctly. This is primarily needed when a prepared statement request comes in,
+	// and the Vitess layer needs to parse the query to identify the query parameters so that the correct response
+	// packets can be sent.
+	ParserOptionsForConnection(c *Conn) (sqlparser.ParserOptions, error)
 }
 
 // Listener is the MySQL server protocol listener.

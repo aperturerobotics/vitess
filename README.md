@@ -23,7 +23,7 @@ For more about Vitess, please visit [vitess.io](https://vitess.io).
 Vitess has a growing community. You can view the list of adopters
 [here](https://github.com/vitessio/vitess/blob/master/ADOPTERS.md).
 
-#Dolt's Use of Vitess
+# Dolt's Use of Vitess
 
 [Dolt's](https://www.doltdb.com/) fork of Vitess has headed in a different direction from the main project. In addition to adding support for DDL statements, stored procedures, and triggers (never a priority of the Vitess project), Dolt's fork prunes away the 90% of Vitess that isn't vital to Dolt's current roadmap as a [version controlled database](https://www.dolthub.com/blog/2022-08-04-database-versioning/). You can read details about this work in this [blog post](https://www.dolthub.com/blog/2020-09-23-vitess-pruning/).
 
@@ -43,9 +43,13 @@ for low-frequency updates like new features and releases.
 
 ## Security
 
+### Security Policy
+
+The [security policy](https://github.com/dolthub/vitess/blob/main/SECURITY.md) is maintained in this repository. Please follow the disclosure instructions there. Please do not initially report security issues in this repository's public GitHub issues.
+
 ### Security Audit
 
-A third party security audit was performed by Cure53. You can see the full report [here](doc/VIT-01-report.pdf).
+A third party security audit was performed of the upstream project by Cure53. You can see the full report [here](https://github.com/vitessio/vitess/blob/main/doc/VIT-01-report.pdf).
 
 ## License
 

@@ -154,7 +154,7 @@ func TestAddOrder(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	dst.(*Union).AddOrder(order)
+	dst.(*SetOp).AddOrder(order)
 	buf = NewTrackedBuffer(nil)
 	dst.Format(buf)
 	want = "select * from t union select * from s order by foo asc"
@@ -184,7 +184,7 @@ func TestSetLimit(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	dst.(*Union).SetLimit(limit)
+	dst.(*SetOp).SetLimit(limit)
 	buf = NewTrackedBuffer(nil)
 	dst.Format(buf)
 	want = "select * from t union select * from s limit 4"
@@ -257,7 +257,7 @@ func TestDDL(t *testing.T) {
 		affected: []string{"a", "b"},
 	}, {
 		query: "alter table a auto_increment 19",
-		output: &MultiAlterDDL{
+		output: &AlterTable{
 			Table: TableName{Name: NewTableIdent("a")},
 			Statements: []*DDL{{
 				Action:      AlterStr,
@@ -268,7 +268,7 @@ func TestDDL(t *testing.T) {
 		affected: []string{"a"},
 	}, {
 		query: "alter table a auto_increment 19.9",
-		output: &MultiAlterDDL{
+		output: &AlterTable{
 			Table: TableName{Name: NewTableIdent("a")},
 			Statements: []*DDL{{
 				Action:      AlterStr,

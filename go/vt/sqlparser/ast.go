@@ -83,12 +83,35 @@ func yyParsePooled(yylex yyLexer) int {
 // a set of types, define the function as iTypeName.
 // This will help avoid name collisions.
 
+// ParserOptions defines options that customize how statements are parsed.
+type ParserOptions struct {
+	// AnsiQuotes controls whether " characters are treated as the identifier character, as
+	// defined in the SQL92 standard, or as a string quote character. By default, AnsiQuotes
+	// mode is disabled, and " chars are treated as string literal quoting characters.
+	// When AnsiQuotes is set to true, " characters are treated as identifier quotes and are
+	// NOT valid as string literal quotes. Note that the ` character may always
+	// be used to quote identifiers, regardless of whether AnsiQuotes is enabled or not. For
+	// more info, see: https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_ansi_quotes
+	AnsiQuotes bool
+}
+
 // Parse parses the SQL in full and returns a Statement, which
 // is the AST representation of the query. If a DDL statement
 // is partially parsed but still contains a syntax error, the
 // error is ignored and the DDL is returned anyway.
 func Parse(sql string) (Statement, error) {
+	return ParseWithOptions(sql, ParserOptions{})
+}
+
+// ParseWithOptions fully parses the SQL in |sql|, using any custom options specified
+// in |options|, and returns a Statement, which is the AST representation of the query.
+// If a DDL statement is partially parsed but contains a syntax error, the
+// error is ignored and the DDL is returned anyway.
+func ParseWithOptions(sql string, options ParserOptions) (Statement, error) {
 	tokenizer := NewStringTokenizer(sql)
+	if options.AnsiQuotes {
+		tokenizer = NewStringTokenizerForAnsiQuotes(sql)
+	}
 	return parseTokenizer(sql, tokenizer)
 }
 
@@ -96,7 +119,18 @@ func Parse(sql string) (Statement, error) {
 // index of the start of the next statement in |sql|. If there was only one
 // statement in |sql|, the value of the returned index will be |len(sql)|.
 func ParseOne(sql string) (Statement, int, error) {
+	return ParseOneWithOptions(sql, ParserOptions{})
+}
+
+// ParseOneWithOptions parses the first SQL statement in |sql|, using any parsing
+// options specified in |options|, and returns the parsed Statement, along with
+// the index of the start of the next statement in |sql|. If there was only one
+// statement in |sql|, the value of the returned index will be |len(sql)|.
+func ParseOneWithOptions(sql string, options ParserOptions) (Statement, int, error) {
 	tokenizer := NewStringTokenizer(sql)
+	if options.AnsiQuotes {
+		tokenizer = NewStringTokenizerForAnsiQuotes(sql)
+	}
 	tokenizer.stopAfterFirstStmt = true
 	tree, err := parseTokenizer(sql, tokenizer)
 	if err != nil {
@@ -136,7 +170,7 @@ func captureSelectExpressions(sql string, tokenizer *Tokenizer) {
 					// column names don't need any special handling to capture the input expression
 					return false, nil
 				} else {
-					node.InputExpression = trimQuotes(strings.TrimLeft(sql[node.StartParsePos:node.EndParsePos], " \n\t"))
+					node.InputExpression = trimQuotes(strings.Trim(sql[node.StartParsePos:node.EndParsePos], " \n\t"))
 				}
 			}
 			return true, nil
@@ -212,12 +246,6 @@ func stringIsUnbrokenQuote(s string, quoteChar byte) bool {
 		}
 	}
 	return true
-}
-
-// ParseTokenizer is a raw interface to parse from the given tokenizer.
-// This does not used pooled parsers, and should not be used in general.
-func ParseTokenizer(tokenizer *Tokenizer) int {
-	return yyParse(tokenizer)
 }
 
 // ParseNext parses a single SQL statement from the tokenizer
@@ -376,7 +404,7 @@ type Statement interface {
 
 type Statements []Statement
 
-func (*Union) iStatement()             {}
+func (*SetOp) iStatement()             {}
 func (*Select) iStatement()            {}
 func (*Stream) iStatement()            {}
 func (*Insert) iStatement()            {}
@@ -385,7 +413,7 @@ func (*Delete) iStatement()            {}
 func (*Set) iStatement()               {}
 func (*DBDDL) iStatement()             {}
 func (*DDL) iStatement()               {}
-func (*MultiAlterDDL) iStatement()     {}
+func (*AlterTable) iStatement()        {}
 func (*Explain) iStatement()           {}
 func (*Show) iStatement()              {}
 func (*Use) iStatement()               {}
@@ -439,46 +467,91 @@ type SelectStatement interface {
 }
 
 func (*Select) iSelectStatement()          {}
-func (*Union) iSelectStatement()           {}
+func (*SetOp) iSelectStatement()           {}
 func (*ParenSelect) iSelectStatement()     {}
 func (*ValuesStatement) iSelectStatement() {}
 
-// Select represents a SELECT statement.
-type Select struct {
-	Cache         string
-	CalcFoundRows bool
-	Comments      Comments
-	Distinct      string
-	Hints         string
-	With          *With
-	SelectExprs   SelectExprs
-	From          TableExprs
-	Where         *Where
-	GroupBy       GroupBy
-	Having        *Where
-	Window        Window
-	OrderBy       OrderBy
-	Limit         *Limit
-	Lock          string
-	Into          *Into
+type QueryOpts struct {
+	All              bool
+	Distinct         bool
+	StraightJoinHint bool
+	SQLCalcFoundRows bool
+	SQLCache         bool
+	SQLNoCache       bool
 }
 
-// Select.Distinct
+func (q *QueryOpts) merge(other QueryOpts) error {
+	q.All = q.All || other.All
+	q.Distinct = q.Distinct || other.Distinct
+	q.StraightJoinHint = q.StraightJoinHint || other.StraightJoinHint
+	q.SQLCalcFoundRows = q.SQLCalcFoundRows || other.SQLCalcFoundRows
+	q.SQLCache = q.SQLCache || other.SQLCache
+	q.SQLNoCache = q.SQLNoCache || other.SQLNoCache
+
+	if q.Distinct && q.All {
+		return errors.New("incorrect usage of DISTINCT and ALL")
+	}
+
+	if q.SQLCache && q.SQLNoCache {
+		return errors.New("incorrect usage of SQL_CACHE and SQL_NO_CACHE")
+	}
+
+	return nil
+}
+
+func (q QueryOpts) Format(buf *TrackedBuffer) {
+	if q.All {
+		buf.Myprintf("%s", AllStr)
+	}
+	if q.Distinct {
+		buf.Myprintf("%s", DistinctStr)
+	}
+	if q.StraightJoinHint {
+		buf.Myprintf("%s", StraightJoinHintStr)
+	}
+	if q.SQLCalcFoundRows {
+		buf.Myprintf("%s", SQLCalcFoundRowsStr)
+	}
+	if q.SQLCache {
+		buf.Myprintf("%s", SQLCacheStr)
+	}
+	if q.SQLNoCache {
+		buf.Myprintf("%s", SQLNoCacheStr)
+	}
+}
+
+// Select represents a SELECT statement.
+type Select struct {
+	Comments    Comments
+	QueryOpts   QueryOpts
+	With        *With
+	SelectExprs SelectExprs
+	From        TableExprs
+	Where       *Where
+	GroupBy     GroupBy
+	Having      *Where
+	Window      Window
+	OrderBy     OrderBy
+	Limit       *Limit
+	Lock        string
+	Into        *Into
+}
+
+// Select.QueryOpts
 const (
-	DistinctStr      = "distinct "
-	StraightJoinHint = "straight_join "
+	DistinctStr         = "distinct "
+	AllStr              = "all "
+	StraightJoinHintStr = "straight_join "
+	SQLCalcFoundRowsStr = "sql_calc_found_rows "
+	SQLCacheStr         = "sql_cache "
+	SQLNoCacheStr       = "sql_no_cache "
 )
 
 // Select.Lock
 const (
-	ForUpdateStr = " for update"
-	ShareModeStr = " lock in share mode"
-)
-
-// Select.Cache
-const (
-	SQLCacheStr   = "sql_cache "
-	SQLNoCacheStr = "sql_no_cache "
+	ForUpdateStr           = " for update"
+	ShareModeStr           = " lock in share mode"
+	ForUpdateSkipLockedStr = " for update skip locked"
 )
 
 // AddOrder adds an order by element
@@ -520,14 +593,9 @@ func (node *Select) SetLimit(limit *Limit) {
 
 // Format formats the node.
 func (node *Select) Format(buf *TrackedBuffer) {
-	calcFoundRows := ""
-	if node.CalcFoundRows {
-		calcFoundRows = "sql_calc_found_rows "
-	}
-
-	buf.Myprintf("%vselect %v%s%s%s%s%v",
+	buf.Myprintf("%vselect %v%v%v",
 		node.With,
-		node.Comments, node.Cache, calcFoundRows, node.Distinct, node.Hints, node.SelectExprs,
+		node.Comments, &node.QueryOpts, node.SelectExprs,
 	)
 
 	if node.From != nil {
@@ -545,6 +613,7 @@ func (node *Select) walkSubtree(visit Visit) error {
 	}
 	return Walk(
 		visit,
+		node.With,
 		node.Comments,
 		node.SelectExprs,
 		node.From,
@@ -672,8 +741,8 @@ func (s *ValuesStatement) walkSubtree(visit Visit) error {
 	return Walk(visit, s.Rows)
 }
 
-// Union represents a UNION statement.
-type Union struct {
+// SetOp represents a UNION, INTERSECT, and EXCEPT statement.
+type SetOp struct {
 	Type        string
 	Left, Right SelectStatement
 	OrderBy     OrderBy
@@ -683,36 +752,42 @@ type Union struct {
 	Into        *Into
 }
 
-// Union.Type
+// SetOp.Type
 const (
-	UnionStr         = "union"
-	UnionAllStr      = "union all"
-	UnionDistinctStr = "union distinct"
+	UnionStr             = "union"
+	UnionAllStr          = "union all"
+	UnionDistinctStr     = "union distinct"
+	IntersectStr         = "intersect"
+	IntersectAllStr      = "intersect all"
+	IntersectDistinctStr = "intersect distinct"
+	ExceptStr            = "except"
+	ExceptAllStr         = "except all"
+	ExceptDistinctStr    = "except distinct"
 )
 
 // AddOrder adds an order by element
-func (node *Union) AddOrder(order *Order) {
+func (node *SetOp) AddOrder(order *Order) {
 	node.OrderBy = append(node.OrderBy, order)
 }
 
-func (node *Union) SetOrderBy(orderBy OrderBy) {
+func (node *SetOp) SetOrderBy(orderBy OrderBy) {
 	node.OrderBy = orderBy
 }
 
-func (node *Union) SetWith(w *With) {
+func (node *SetOp) SetWith(w *With) {
 	node.With = w
 }
 
 // SetLimit sets the limit clause
-func (node *Union) SetLimit(limit *Limit) {
+func (node *SetOp) SetLimit(limit *Limit) {
 	node.Limit = limit
 }
 
-func (node *Union) SetLock(lock string) {
+func (node *SetOp) SetLock(lock string) {
 	node.Lock = lock
 }
 
-func (node *Union) SetInto(into *Into) error {
+func (node *SetOp) SetInto(into *Into) error {
 	if into == nil {
 		if r, ok := node.Right.(*Select); ok {
 			node.Into = r.Into
@@ -727,17 +802,17 @@ func (node *Union) SetInto(into *Into) error {
 	return nil
 }
 
-func (node *Union) GetInto() *Into {
+func (node *SetOp) GetInto() *Into {
 	return node.Into
 }
 
 // Format formats the node.
-func (node *Union) Format(buf *TrackedBuffer) {
+func (node *SetOp) Format(buf *TrackedBuffer) {
 	buf.Myprintf("%v%v %s %v%v%v%s%v", node.With, node.Left, node.Type, node.Right,
 		node.OrderBy, node.Limit, node.Lock, node.Into)
 }
 
-func (node *Union) walkSubtree(visit Visit) error {
+func (node *SetOp) walkSubtree(visit Visit) error {
 	if node == nil {
 		return nil
 	}
@@ -766,6 +841,7 @@ type Load struct {
 	*Lines
 	IgnoreNum *SQLVal
 	Columns
+	IgnoreOrReplace string
 }
 
 func (*Load) iLoadStatement() {}
@@ -780,19 +856,24 @@ func (node *Load) Format(buf *TrackedBuffer) {
 		charset = " character set " + node.Charset
 	}
 
-	ignore := ""
+	ignoreNum := ""
 	if node.IgnoreNum != nil {
-		ignore = fmt.Sprintf(" ignore %v lines", node.IgnoreNum)
+		ignoreNum = fmt.Sprintf(" ignore %v lines", node.IgnoreNum)
 	}
 
 	if node.IgnoreNum == nil && node.Columns != nil {
-		ignore = " "
+		ignoreNum = " "
 	} else if node.IgnoreNum != nil && node.Columns != nil {
-		ignore += " "
+		ignoreNum += " "
 	}
 
-	buf.Myprintf("load data %sinfile '%s' into table %s%v%s%v%v%s%v", local, node.Infile, node.Table.String(),
-		node.Partition, charset, node.Fields, node.Lines, ignore, node.Columns)
+	ignoreOrReplace := node.IgnoreOrReplace
+	if ignoreOrReplace == ReplaceStr {
+		ignoreOrReplace += " "
+	}
+
+	buf.Myprintf("load data %sinfile '%s' %sinto table %s%v%s%v%v%s%v", local, node.Infile, ignoreOrReplace, node.Table.String(),
+		node.Partition, charset, node.Fields, node.Lines, ignoreNum, node.Columns)
 }
 
 func (node *Load) walkSubtree(visit Visit) error {
@@ -1560,7 +1641,7 @@ type InsertRows interface {
 }
 
 func (*Select) iInsertRows()      {}
-func (*Union) iInsertRows()       {}
+func (*SetOp) iInsertRows()       {}
 func (Values) iInsertRows()       {}
 func (*ParenSelect) iInsertRows() {}
 
@@ -1733,6 +1814,7 @@ func (node *DBDDL) Format(buf *TrackedBuffer) {
 
 type ViewSpec struct {
 	ViewName  TableName
+	Columns   Columns
 	Algorithm string
 	Definer   string
 	Security  string
@@ -1785,15 +1867,35 @@ type EventSpec struct {
 	Definer              string
 	IfNotExists          bool
 	OnSchedule           *EventScheduleSpec
-	OnCompletionPreserve bool
+	OnCompletionPreserve EventOnCompletion
 	Status               EventStatus
 	Comment              *SQLVal
 	Body                 Statement
+
+	// used for ALTER EVENT statement
+	RenameName EventName
 }
+
+// ValidateAlterEvent checks that at least one event field is defined to alter.
+func (es *EventSpec) ValidateAlterEvent() error {
+	if es.OnSchedule == nil && es.OnCompletionPreserve == EventOnCompletion_Undefined && es.RenameName.IsEmpty() && es.Status == EventStatus_Undefined && es.Comment == nil && es.Body == nil {
+		return fmt.Errorf("You have an error in your SQL syntax; At least one event field to alter needs to be defined")
+	}
+	return nil
+}
+
+type EventOnCompletion string
+
+const (
+	EventOnCompletion_Undefined   EventOnCompletion = ""
+	EventOnCompletion_Preserve    EventOnCompletion = "on completion preserve"
+	EventOnCompletion_NotPreserve EventOnCompletion = "on completion not preserve"
+)
 
 type EventStatus string
 
 const (
+	EventStatus_Undefined      EventStatus = ""
 	EventStatus_Enable         EventStatus = "enable"
 	EventStatus_Disable        EventStatus = "disable"
 	EventStatus_DisableOnSlave EventStatus = "disable on slave"
@@ -1815,9 +1917,9 @@ type EventScheduleTimeSpec struct {
 func (est *EventScheduleTimeSpec) Format(buf *TrackedBuffer) {
 	sb := strings.Builder{}
 
-	sb.WriteString(fmt.Sprintf("%s ", String(est.EventTimestamp)))
+	sb.WriteString(fmt.Sprintf("%s", String(est.EventTimestamp)))
 	for _, interval := range est.EventIntervals {
-		sb.WriteString(fmt.Sprintf("+ interval %v %s ", interval.Expr, interval.Unit))
+		sb.WriteString(fmt.Sprintf(" + interval %v %s", interval.Expr, interval.Unit))
 	}
 
 	buf.Myprintf("%s", sb.String())
@@ -1857,16 +1959,16 @@ func (c Characteristic) String() string {
 	return string(c.Type)
 }
 
-// MultiAlterDDL represents multiple ALTER statements on a single table.
-type MultiAlterDDL struct {
+// AlterTable represents an ALTER table statement, which can include multiple DDL clauses.
+type AlterTable struct {
 	Table      TableName
 	Statements []*DDL
 }
 
-var _ SQLNode = (*MultiAlterDDL)(nil)
+var _ SQLNode = (*AlterTable)(nil)
 
 // Format implements SQLNode.
-func (m *MultiAlterDDL) Format(buf *TrackedBuffer) {
+func (m *AlterTable) Format(buf *TrackedBuffer) {
 	buf.Myprintf("alter table %v", m.Table)
 	for i, ddl := range m.Statements {
 		if i > 0 {
@@ -1877,7 +1979,7 @@ func (m *MultiAlterDDL) Format(buf *TrackedBuffer) {
 }
 
 // walkSubtree implements SQLNode.
-func (m *MultiAlterDDL) walkSubtree(visit Visit) error {
+func (m *AlterTable) walkSubtree(visit Visit) error {
 	for _, ddl := range m.Statements {
 		err := ddl.walkSubtree(visit)
 		if err != nil {
@@ -2023,7 +2125,7 @@ func (node *DDL) Format(buf *TrackedBuffer) {
 			if view.Security != "" {
 				afterCreate = fmt.Sprintf("%ssql security %s ", afterCreate, strings.ToLower(view.Security))
 			}
-			buf.Myprintf("%s %sview %v as %v", node.Action, afterCreate, view.ViewName, view.ViewExpr)
+			buf.Myprintf("%s %sview %v%v as %v", node.Action, afterCreate, view.ViewName, view.Columns, view.ViewExpr)
 		} else if node.TriggerSpec != nil {
 			trigger := node.TriggerSpec
 			triggerDef := ""
@@ -2071,26 +2173,29 @@ func (node *DDL) Format(buf *TrackedBuffer) {
 			sb.WriteString(fmt.Sprintf("event%s %s ", notExists, event.EventName))
 
 			if event.OnSchedule.At != nil {
-				sb.WriteString(fmt.Sprintf("on schedule at %s", event.OnSchedule.At.String()))
+				sb.WriteString(fmt.Sprintf("on schedule at %s ", event.OnSchedule.At.String()))
 			} else {
 				sb.WriteString(fmt.Sprintf("on schedule every %s %s ", String(event.OnSchedule.EveryInterval.Expr), event.OnSchedule.EveryInterval.Unit))
 				if event.OnSchedule.Starts != nil {
-					sb.WriteString(fmt.Sprintf("starts %s", event.OnSchedule.Starts.String()))
+					sb.WriteString(fmt.Sprintf("starts %s ", event.OnSchedule.Starts.String()))
 				}
 				if event.OnSchedule.Ends != nil {
-					sb.WriteString(fmt.Sprintf("ends %s", event.OnSchedule.Ends.String()))
+					sb.WriteString(fmt.Sprintf("ends %s ", event.OnSchedule.Ends.String()))
 				}
 			}
 
-			if event.OnCompletionPreserve {
-				sb.WriteString("on completion preserve ")
+			if event.OnCompletionPreserve == EventOnCompletion_Preserve {
+				sb.WriteString(fmt.Sprintf("%s ", event.OnCompletionPreserve))
+			}
+			if event.Status != EventStatus_Undefined {
+				sb.WriteString(fmt.Sprintf("%s ", event.Status))
 			}
 			if event.Comment != nil {
 				sb.WriteString(fmt.Sprintf("comment %s ", event.Comment))
 			}
 
 			buf.Myprintf("%sdo %v", sb.String(), event.Body)
-		} else {
+		} else { // TABLE
 			notExists := ""
 			if node.IfNotExists {
 				notExists = " if not exists"
@@ -2149,12 +2254,55 @@ func (node *DDL) Format(buf *TrackedBuffer) {
 			buf.Myprintf(", %v to %v", node.FromTables[i], node.ToTables[i])
 		}
 	case AlterStr:
-		buf.Myprintf("%s table %v", node.Action, node.Table)
-		node.alterFormat(buf)
+		if node.EventSpec != nil {
+			event := node.EventSpec
+			sb := strings.Builder{}
+			sb.WriteString("alter")
+			if event.Definer != "" {
+				sb.WriteString(fmt.Sprintf(" definer = %s", event.Definer))
+			}
+
+			sb.WriteString(fmt.Sprintf(" event %s", event.EventName))
+
+			if event.OnSchedule != nil {
+				if event.OnSchedule.At != nil {
+					sb.WriteString(fmt.Sprintf(" on schedule at %s", event.OnSchedule.At.String()))
+				} else {
+					sb.WriteString(fmt.Sprintf(" on schedule every %s %s", String(event.OnSchedule.EveryInterval.Expr), event.OnSchedule.EveryInterval.Unit))
+					if event.OnSchedule.Starts != nil {
+						sb.WriteString(fmt.Sprintf(" starts %s", event.OnSchedule.Starts.String()))
+					}
+					if event.OnSchedule.Ends != nil {
+						sb.WriteString(fmt.Sprintf(" ends %s", event.OnSchedule.Ends.String()))
+					}
+				}
+			}
+
+			if event.OnCompletionPreserve != EventOnCompletion_Undefined {
+				sb.WriteString(fmt.Sprintf(" %s", event.OnCompletionPreserve))
+			}
+			if !event.RenameName.IsEmpty() {
+				sb.WriteString(fmt.Sprintf(" rename to %s", event.RenameName))
+			}
+			if event.Status != EventStatus_Undefined {
+				sb.WriteString(fmt.Sprintf(" %s", event.Status))
+			}
+			if event.Comment != nil {
+				sb.WriteString(fmt.Sprintf(" comment %s", event.Comment))
+			}
+			if event.Body != nil {
+				buf.Myprintf("%s do %v", sb.String(), event.Body)
+			} else {
+				buf.Myprintf("%s", sb.String())
+			}
+		} else {
+			buf.Myprintf("%s table %v", node.Action, node.Table)
+			node.alterFormat(buf)
+		}
 	case FlushStr:
 		buf.Myprintf("%s", node.Action)
 	case AddAutoIncStr:
-		buf.Myprintf("alter vschema on %v add auto_increment %v", node.Table, node.AutoIncSpec)
+		buf.Myprintf("alter schema on %v add auto_increment %v", node.Table, node.AutoIncSpec)
 	default:
 		buf.Myprintf("%s table %v", node.Action, node.Table)
 	}
@@ -2470,17 +2618,15 @@ type ColumnType struct {
 	// Key specification
 	KeyOpt ColumnKeyOption
 
+	// Foreign key specification
+	ForeignKeyDef *ForeignKeyDefinition
+
 	// Generated columns
 	GeneratedExpr Expr    // The expression used to generate this column
 	Stored        BoolVal // Default is Virtual (not stored)
 
 	// For spatial types
 	SRID *SQLVal
-
-	// For json_table
-	Path    string
-	Exists  bool
-	OnEmpty Expr
 }
 
 func (ct *ColumnType) merge(other ColumnType) error {
@@ -2519,6 +2665,13 @@ func (ct *ColumnType) merge(other ColumnType) error {
 		ct.KeyOpt = other.KeyOpt
 	}
 
+	if other.ForeignKeyDef != nil {
+		if ct.ForeignKeyDef != nil {
+			return errors.New("cannot include more than one foreign key definition in a column definition")
+		}
+		ct.ForeignKeyDef = other.ForeignKeyDef
+	}
+
 	if other.Comment != nil {
 		if ct.Comment != nil {
 			return errors.New("cannot include more than one comment for a column definition")
@@ -2546,13 +2699,6 @@ func (ct *ColumnType) merge(other ColumnType) error {
 			return errors.New("cannot define SRID for non spatial types")
 		}
 		ct.SRID = other.SRID
-	}
-
-	if other.Path != "" {
-		if ct.Path != "" {
-			return errors.New("cannot include PATH more than once")
-		}
-		ct.Path = other.Path
 	}
 
 	if other.Charset != "" {
@@ -2646,16 +2792,25 @@ func (ct *ColumnType) Format(buf *TrackedBuffer) {
 	if ct.KeyOpt == colKeyFulltextKey {
 		opts = append(opts, keywordStrings[FULLTEXT])
 	}
+	if ct.ForeignKeyDef != nil {
+		opts = append(opts, KeywordString(REFERENCES),
+			ct.ForeignKeyDef.ReferencedTable.String(),
+			fmt.Sprintf("%v", ct.ForeignKeyDef.ReferencedColumns))
+		if ct.ForeignKeyDef.OnDelete != DefaultAction {
+			opts = append(opts, "on delete", fmt.Sprintf("%v", ct.ForeignKeyDef.OnDelete))
+		}
+		if ct.ForeignKeyDef.OnUpdate != DefaultAction {
+			opts = append(opts, "on update", fmt.Sprintf("%v", ct.ForeignKeyDef.OnUpdate))
+		}
+	}
+
 	if ct.GeneratedExpr != nil {
-		opts = append(opts, keywordStrings[GENERATED], keywordStrings[ALWAYS], keywordStrings[AS], "("+String(ct.GeneratedExpr)+")")
+		opts = append(opts, keywordStrings[GENERATED], keywordStrings[ALWAYS], keywordStrings[AS], String(ct.GeneratedExpr))
 		if ct.Stored {
 			opts = append(opts, keywordStrings[STORED])
 		} else {
 			opts = append(opts, keywordStrings[VIRTUAL])
 		}
-	}
-	if ct.Path != "" {
-		opts = append(opts, keywordStrings[PATH], `"`+ct.Path+`"`)
 	}
 
 	if len(opts) != 0 {
@@ -2794,6 +2949,131 @@ func (ct *ColumnType) SQLType() querypb.Type {
 	panic("unimplemented type " + ct.Type)
 }
 
+// JSONTableExpr represents a TableExpr that's a json_table operation.
+type JSONTableExpr struct {
+	Data  Expr
+	Spec  *JSONTableSpec
+	Alias TableIdent
+}
+
+// Format formats the node.
+func (jte *JSONTableExpr) Format(buf *TrackedBuffer) {
+	buf.Myprintf(`%s(%v, %v) as %v`, keywordStrings[JSON_TABLE], jte.Data, jte.Spec, jte.Alias)
+}
+
+func (jte *JSONTableExpr) walkSubtree(visit Visit) error {
+	if jte == nil {
+		return nil
+	}
+	return Walk(visit, jte.Data, jte.Spec)
+}
+
+// JSONTableSpec describes the structure of a table from a JSON_TABLE() statement
+type JSONTableSpec struct {
+	Columns []*JSONTableColDef
+	Path    string
+}
+
+// AddColumn appends the given column to the list in the spec
+func (ts *JSONTableSpec) AddColumn(cd *JSONTableColDef) {
+	ts.Columns = append(ts.Columns, cd)
+}
+
+// Format formats the node.
+func (ts *JSONTableSpec) Format(buf *TrackedBuffer) {
+	buf.Myprintf("'%s' %s(", ts.Path, keywordStrings[COLUMNS])
+	for i, col := range ts.Columns {
+		if i == 0 {
+			buf.Myprintf("%v", col)
+		} else {
+			buf.Myprintf(", %v", col)
+		}
+	}
+	buf.Myprintf(")")
+}
+
+func (ts *JSONTableSpec) walkSubtree(visit Visit) error {
+	if ts == nil {
+		return nil
+	}
+
+	for _, n := range ts.Columns {
+		if err := Walk(visit, n); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// JSONTableColDef describes a column in a JSON_TABLE statement
+type JSONTableColDef struct {
+	Name ColIdent
+	Type ColumnType
+	Opts JSONTableColOpts
+	Spec *JSONTableSpec
+}
+
+// Format formats the node.
+func (col *JSONTableColDef) Format(buf *TrackedBuffer) {
+	if col.Spec != nil {
+		buf.Myprintf("%s %s %v", keywordStrings[NESTED], keywordStrings[PATH], col.Spec)
+		return
+	} else {
+		exists := ""
+		if col.Opts.Exists {
+			exists = " " + keywordStrings[EXISTS]
+		}
+		if col.Type.Autoincrement {
+			buf.Myprintf("%v %s", col.Name, "FOR ORDINALITY")
+		} else {
+			buf.Myprintf("%v %v%s %s %v", col.Name, &col.Type, exists, keywordStrings[PATH], col.Opts)
+		}
+	}
+}
+
+func (col *JSONTableColDef) walkSubtree(visit Visit) error {
+	if col == nil {
+		return nil
+	}
+	return Walk(
+		visit,
+		col.Name,
+		&col.Type,
+	)
+}
+
+// JSONTableColOpts describes the column options in a JSON_TABLE statement
+type JSONTableColOpts struct {
+	Path         string
+	ValOnEmpty   Expr
+	ValOnError   Expr
+	ErrorOnEmpty bool // TODO: not necessary, can be inferred from ValOnEmpty == nil
+	ErrorOnError bool // TODO: not necessary, can be inferred from ValOnError == nil
+	Exists       bool
+}
+
+// Format formats the node.
+func (opt JSONTableColOpts) Format(buf *TrackedBuffer) {
+	buf.Myprintf("'%s'", opt.Path)
+	if opt.ValOnEmpty != nil {
+		buf.Myprintf(" DEFAULT %v %s %s", opt.ValOnEmpty, keywordStrings[ON], keywordStrings[EMPTY])
+	}
+	if opt.ValOnError != nil {
+		buf.Myprintf(" DEFAULT %v %s %s ", opt.ValOnError, keywordStrings[ON], keywordStrings[ERROR])
+	}
+	if opt.ErrorOnEmpty {
+		buf.Myprintf(" %s %s %s", keywordStrings[ERROR], keywordStrings[ON], keywordStrings[EMPTY])
+	}
+	if opt.ErrorOnError {
+		buf.Myprintf(" %s %s %s", keywordStrings[ERROR], keywordStrings[ON], keywordStrings[ERROR])
+	}
+}
+
+func (opt JSONTableColOpts) walkSubtree(visit Visit) error {
+	return Walk(visit)
+}
+
 // IndexSpec describes an index operation in an ALTER statement
 type IndexSpec struct {
 	// Action states whether it's a CREATE, DROP, or RENAME
@@ -2855,7 +3135,7 @@ func (idx *IndexSpec) Format(buf *TrackedBuffer) {
 			buf.Myprintf(" %s", opt.Name)
 			if opt.Using != "" {
 				buf.Myprintf(" %s", opt.Using)
-			} else {
+			} else if opt.Value != nil {
 				buf.Myprintf(" %v", opt.Value)
 			}
 		}
@@ -2913,7 +3193,7 @@ func (idx *IndexDefinition) Format(buf *TrackedBuffer) {
 		buf.Myprintf(" %s", opt.Name)
 		if opt.Using != "" {
 			buf.Myprintf(" %s", opt.Using)
-		} else {
+		} else if opt.Value != nil {
 			buf.Myprintf(" %v", opt.Value)
 		}
 	}
@@ -3097,6 +3377,7 @@ type ForeignKeyDefinition struct {
 	Source            Columns
 	ReferencedTable   TableName
 	ReferencedColumns Columns
+	Index             string
 	OnDelete          ReferenceAction
 	OnUpdate          ReferenceAction
 }
@@ -3105,7 +3386,11 @@ var _ ConstraintInfo = &ForeignKeyDefinition{}
 
 // Format formats the node.
 func (f *ForeignKeyDefinition) Format(buf *TrackedBuffer) {
-	buf.Myprintf("foreign key %v references %v %v", f.Source, f.ReferencedTable, f.ReferencedColumns)
+	index := ""
+	if f.Index != "" {
+		index = f.Index + " "
+	}
+	buf.Myprintf("foreign key %s%v references %v %v", index, f.Source, f.ReferencedTable, f.ReferencedColumns)
 	if f.OnDelete != DefaultAction {
 		buf.Myprintf(" on delete %v", f.OnDelete)
 	}
@@ -3177,12 +3462,12 @@ func (node *Explain) Format(buf *TrackedBuffer) {
 const (
 	CreateTriggerStr   = "create trigger"
 	CreateProcedureStr = "create procedure"
-	CreateEventStr = "create event"
-	CreateTableStr = "create table"
+	CreateEventStr     = "create event"
+	CreateTableStr     = "create table"
 
 	ProcedureStatusStr = "procedure status"
-	FunctionStatusStr = "function status"
-	TableStatusStr = "table status"
+	FunctionStatusStr  = "function status"
+	TableStatusStr     = "table status"
 )
 
 // Show represents a show statement.
@@ -3193,7 +3478,7 @@ type Show struct {
 	IfNotExists            bool
 	ShowTablesOpt          *ShowTablesOpt
 	Scope                  string
-	ShowCollationFilterOpt *Expr
+	ShowCollationFilterOpt Expr
 	ShowIndexFilterOpt     Expr
 	Filter                 *ShowFilter
 	Limit                  *Limit
@@ -3207,7 +3492,6 @@ func (node *Show) Format(buf *TrackedBuffer) {
 	switch loweredType {
 	case "tables", "columns", "fields":
 		if node.ShowTablesOpt != nil {
-			opt := node.ShowTablesOpt
 			buf.Myprintf("show ")
 			if node.Full {
 				buf.Myprintf("full ")
@@ -3216,24 +3500,14 @@ func (node *Show) Format(buf *TrackedBuffer) {
 			if (loweredType == "columns" || loweredType == "fields") && node.HasTable() {
 				buf.Myprintf(" from %v", node.Table)
 			}
-			if opt.DbName != "" {
-				buf.Myprintf(" from %s", opt.DbName)
-			}
-			if opt.AsOf != nil {
-				buf.Myprintf(" as of %v", opt.AsOf)
-			}
-			buf.Myprintf("%v", opt.Filter)
+			node.ShowTablesOpt.Format(buf)
 			return
 		}
 	case "triggers", "events":
 		if node.ShowTablesOpt != nil {
-			opt := node.ShowTablesOpt
 			buf.Myprintf("show ")
 			buf.Myprintf("%s", loweredType)
-			if opt.DbName != "" {
-				buf.Myprintf(" from %s", opt.DbName)
-			}
-			buf.Myprintf("%v", opt.Filter)
+			node.ShowTablesOpt.Format(buf)
 			return
 		}
 	case "index":
@@ -3253,9 +3527,7 @@ func (node *Show) Format(buf *TrackedBuffer) {
 			buf.Myprintf("show %s %v", loweredType, node.Table)
 
 			if node.ShowTablesOpt != nil {
-				if node.ShowTablesOpt.AsOf != nil {
-					buf.Myprintf(" as of %v", node.ShowTablesOpt.AsOf)
-				}
+				node.ShowTablesOpt.Format(buf)
 			}
 			return
 		}
@@ -3301,8 +3573,8 @@ func (node *Show) Format(buf *TrackedBuffer) {
 		}
 	}
 
-	if node.Type == "collation" && node.ShowCollationFilterOpt != nil {
-		buf.Myprintf(" where %v", *node.ShowCollationFilterOpt)
+	if strings.EqualFold(node.Type, "collation") && node.ShowCollationFilterOpt != nil {
+		buf.Myprintf(" where %v", node.ShowCollationFilterOpt)
 	}
 	if node.HasTable() {
 		buf.Myprintf(" %v", node.Table)
@@ -3322,8 +3594,11 @@ func (node *Show) walkSubtree(visit Visit) error {
 	return Walk(
 		visit,
 		node.Table,
+		node.ShowTablesOpt,
+		node.ShowCollationFilterOpt,
 		node.ShowIndexFilterOpt,
 		node.Filter,
+		node.Limit,
 	)
 }
 
@@ -3332,6 +3607,30 @@ type ShowTablesOpt struct {
 	DbName string
 	Filter *ShowFilter
 	AsOf   Expr
+}
+
+// Format formats the node.
+func (node *ShowTablesOpt) Format(buf *TrackedBuffer) {
+	if node == nil {
+		return
+	}
+	if node.DbName != "" {
+		buf.Myprintf(" from %s", node.DbName)
+	}
+	if node.AsOf != nil {
+		buf.Myprintf(" as of ")
+		node.AsOf.Format(buf)
+	}
+	if node.Filter != nil {
+		node.Filter.Format(buf)
+	}
+}
+
+func (node *ShowTablesOpt) walkSubtree(visit Visit) error {
+	if node == nil {
+		return nil
+	}
+	return Walk(visit, node.Filter, node.AsOf)
 }
 
 // ShowFilter is show tables filter
@@ -3350,6 +3649,13 @@ func (node *ShowFilter) Format(buf *TrackedBuffer) {
 	} else {
 		buf.Myprintf(" where %v", node.Filter)
 	}
+}
+
+func (node *ShowFilter) walkSubtree(visit Visit) error {
+	if node == nil {
+		return nil
+	}
+	return Walk(visit, node.Filter)
 }
 
 // Use represents a use statement.
@@ -3377,7 +3683,7 @@ type Begin struct {
 
 // Format formats the node.
 func (node *Begin) Format(buf *TrackedBuffer) {
-	buf.WriteString("begin")
+	buf.WriteString("start transaction")
 
 	if node.TransactionCharacteristic != "" {
 		buf.Myprintf(" %s", node.TransactionCharacteristic)
@@ -3630,9 +3936,10 @@ func (node *AliasedExpr) Format(buf *TrackedBuffer) {
 		if !node.As.IsEmpty() {
 			// The AS is omitted here because it gets captured by the InputExpression. A bug, but not a major one since
 			// we use the alias expression for the column in the return schema.
-			buf.Myprintf("%s %v", node.InputExpression, node.As)
+			buf.Myprintf("%v %v", node.Expr, node.As)
 		} else {
-			buf.Myprintf("%s", node.InputExpression)
+			//buf.Myprintf("%s", node.InputExpression)
+			node.Expr.Format(buf)
 		}
 	} else if !node.As.IsEmpty() {
 		buf.Myprintf("%v as %v", node.Expr, node.As)
@@ -3825,37 +4132,61 @@ type AliasedTableExpr struct {
 	As         TableIdent
 	Hints      *IndexHints
 	AsOf       *AsOf
+	Lateral    bool
 }
 
 type AsOf struct {
-	Time Expr
+	Time           Expr
+	Start          Expr
+	End            Expr
+	StartInclusive bool
+	EndInclusive   bool
+	All            bool
 }
 
 func (node *AsOf) Format(buf *TrackedBuffer) {
-	buf.Myprintf("as of %v", node.Time)
+	if node.Time != nil {
+		buf.Myprintf("as of %v", node.Time)
+	} else if node.Start != nil && node.End != nil {
+		if node.StartInclusive && node.EndInclusive {
+			buf.Myprintf("for system_time contained in (%v, %v)", node.Start, node.End)
+		} else if node.EndInclusive {
+			buf.Myprintf("for system_time between %v and %v", node.Start, node.End)
+		} else {
+			buf.Myprintf("for system_time from %v to %v", node.Start, node.End)
+		}
+	} else if node.All {
+		buf.Myprintf("for system_time all")
+	}
 }
 
 func (node *AsOf) walkSubtree(visit Visit) error {
 	if node == nil {
 		return nil
 	}
-	return Walk(visit, node.Time)
+	return Walk(visit, node.Time, node.Start, node.End)
 }
 
 // Format formats the node.
 func (node *AliasedTableExpr) Format(buf *TrackedBuffer) {
+	if node.Lateral {
+		buf.Myprintf("%s ", keywordStrings[LATERAL])
+	}
+
 	switch node.Expr.(type) {
 	case *ValuesStatement:
 		buf.Myprintf("(%v)", node.Expr)
 	default:
 		buf.Myprintf("%v%v", node.Expr, node.Partitions)
 	}
+
 	if node.AsOf != nil {
 		buf.Myprintf(" %v", node.AsOf)
 	}
 	if !node.As.IsEmpty() {
 		buf.Myprintf(" as %v", node.As)
 	}
+
 	switch node := node.Expr.(type) {
 	case *ValuesStatement:
 		if len(node.Columns) > 0 {
@@ -3866,6 +4197,7 @@ func (node *AliasedTableExpr) Format(buf *TrackedBuffer) {
 			buf.Myprintf(" %v", node.Columns)
 		}
 	}
+
 	if node.Hints != nil {
 		// Hint node provides the space padding.
 		buf.Myprintf("%v", node.Hints)
@@ -4293,27 +4625,6 @@ func (node *JoinTableExpr) walkSubtree(visit Visit) error {
 		node.RightExpr,
 		node.Condition,
 	)
-}
-
-// JSONTableExpr represents a TableExpr that's a json_table operation.
-type JSONTableExpr struct {
-	Data  Expr
-	Path  string
-	Spec  *TableSpec
-	Alias TableIdent
-}
-
-// Format formats the node.
-func (node *JSONTableExpr) Format(buf *TrackedBuffer) {
-	buf.Myprintf(`JSON_TABLE(%v, "%s" COLUMNS%v) as %v`, node.Data, node.Path, node.Spec, node.Alias)
-
-}
-
-func (node *JSONTableExpr) walkSubtree(visit Visit) error {
-	if node == nil {
-		return nil
-	}
-	return Walk(visit)
 }
 
 // IndexHints represents a list of index hints.
@@ -5568,7 +5879,11 @@ type ConvertExpr struct {
 
 // Format formats the node.
 func (node *ConvertExpr) Format(buf *TrackedBuffer) {
-	buf.Myprintf("%s(%v, %v)", node.Name, node.Expr, node.Type)
+	if strings.ToLower(node.Name) == "cast" {
+		buf.Myprintf("%s(%v as %v)", node.Name, node.Expr, node.Type)
+	} else {
+		buf.Myprintf("%s(%v, %v)", node.Name, node.Expr, node.Type)
+	}
 }
 
 func (node *ConvertExpr) walkSubtree(visit Visit) error {
@@ -6479,11 +6794,17 @@ func (node *ColIdent) UnmarshalJSON(b []byte) error {
 type TableFuncExpr struct {
 	Name  string
 	Exprs SelectExprs
+	Alias TableIdent
 }
 
 // Format formats the node.
 func (node TableFuncExpr) Format(buf *TrackedBuffer) {
-	buf.Myprintf("%s(%v)", node.Name, node.Exprs)
+	if node.Alias.IsEmpty() {
+		buf.Myprintf("%s(%v)", node.Name, node.Exprs)
+	} else {
+		buf.Myprintf("%s(%v) %s %v", node.Name, node.Exprs, keywordStrings[AS], node.Alias)
+	}
+
 }
 
 // IsEmpty returns true if TableFuncExpr's name is empty.
@@ -6722,6 +7043,11 @@ func compliantName(in string) string {
 
 type Analyze struct {
 	Tables TableNames
+	// UPDATE or DELETE
+	Action  string
+	Columns Columns
+	// JSON data for stats
+	Using Expr
 }
 
 func (*Analyze) iStatement() {}
@@ -6734,7 +7060,14 @@ func (node *Analyze) walkSubtree(visit Visit) error {
 }
 
 func (node *Analyze) Format(buf *TrackedBuffer) {
-	buf.Myprintf("analyze table %v", node.Tables)
+	switch node.Action {
+	case UpdateStr:
+		buf.Myprintf("analyze table %v update histogram on %v using data %v", node.Tables, node.Columns, node.Using)
+	case DropStr:
+		buf.Myprintf("analyze table %v drop histogram on %v", node.Tables, node.Columns)
+	default:
+		buf.Myprintf("analyze table %v", node.Tables)
+	}
 }
 
 type Prepare struct {
@@ -6788,4 +7121,51 @@ func (node *Deallocate) walkSubtree(visit Visit) error {
 
 func (node *Deallocate) Format(buf *TrackedBuffer) {
 	buf.Myprintf("deallocate prepare %s", node.Name)
+}
+
+type CreateSpatialRefSys struct {
+	SRID        *SQLVal
+	OrReplace   bool
+	IfNotExists bool
+	SrsAttr     *SrsAttribute
+}
+
+func (*CreateSpatialRefSys) iStatement() {}
+
+func (node *CreateSpatialRefSys) walkSubtree(visit Visit) error {
+	return nil
+}
+
+func (node *CreateSpatialRefSys) Format(buf *TrackedBuffer) {
+	buf.Myprintf("create ")
+	if node.OrReplace {
+		buf.WriteString("or replace ")
+	}
+	buf.Myprintf("spatial reference system ")
+	if node.IfNotExists {
+		buf.WriteString("if not exists ")
+	}
+	buf.Myprintf("%v\n", node.SRID)
+	buf.Myprintf("%v", node.SrsAttr)
+}
+
+type SrsAttribute struct {
+	Name         string
+	Definition   string
+	Organization string
+	OrgID        *SQLVal
+	Description  string
+}
+
+func (*SrsAttribute) iStatement() {}
+
+func (node *SrsAttribute) walkSubtree(visit Visit) error {
+	return nil
+}
+
+func (node *SrsAttribute) Format(buf *TrackedBuffer) {
+	buf.Myprintf("name '%s'\n", node.Name)
+	buf.Myprintf("definition '%s'\n", node.Definition)
+	buf.Myprintf("organization '%s' identified by %v\n", node.Organization, node.OrgID)
+	buf.Myprintf("description '%s'", node.Description)
 }

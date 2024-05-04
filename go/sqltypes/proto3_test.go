@@ -19,8 +19,6 @@ package sqltypes
 import (
 	"testing"
 
-	"google.golang.org/protobuf/proto"
-
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
 	vtrpcpb "github.com/dolthub/vitess/go/vt/proto/vtrpc"
 	"github.com/dolthub/vitess/go/vt/vterrors"
@@ -78,7 +76,7 @@ func TestResult(t *testing.T) {
 		},
 	}
 	p3converted := ResultToProto3(sqlResult)
-	if !proto.Equal(p3converted, p3Result) {
+	if !p3converted.EqualVT(p3Result) {
 		t.Errorf("P3:\n%v, want\n%v", p3converted, p3Result)
 	}
 

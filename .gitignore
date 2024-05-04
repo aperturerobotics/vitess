@@ -83,6 +83,12 @@ releases
 dist/*
 py-vtdb*
 vthook*
-bin*
+binlog_*.go
 
 vtdataroot*
+
+vendor/
+node_modules/
+yarn.lock
+.tools/
+>>>>>>> 99f3ba386 (refactor: use protobuf-go-lite)

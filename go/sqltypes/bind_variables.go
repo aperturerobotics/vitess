@@ -23,8 +23,6 @@ import (
 	"strconv"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
 )
 
@@ -129,7 +127,7 @@ func BuildBindVariable(v interface{}) (*querypb.BindVariable, error) {
 	//	}, nil
 	case time.Time:
 		return &querypb.BindVariable{
-			Type:   querypb.Type_TIMESTAMP,
+			Type:  querypb.Type_TIMESTAMP,
 			Value: []byte(v.String()),
 		}, nil
 	// TODO: somehow support types.Timespan
@@ -279,7 +277,7 @@ func BindVariableToValue(bv *querypb.BindVariable) (Value, error) {
 // BindVariablesEqual compares two maps of bind variables.
 // For protobuf messages we have to use "proto.Equal".
 func BindVariablesEqual(x, y map[string]*querypb.BindVariable) bool {
-	return proto.Equal(&querypb.BoundQuery{BindVariables: x}, &querypb.BoundQuery{BindVariables: y})
+	return (&querypb.BoundQuery{BindVariables: x}).EqualVT(&querypb.BoundQuery{BindVariables: y})
 }
 
 // CopyBindVariables returns a shallow-copy of the given bindVariables map.

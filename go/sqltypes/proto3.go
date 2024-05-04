@@ -17,8 +17,6 @@ limitations under the License.
 package sqltypes
 
 import (
-	"google.golang.org/protobuf/proto"
-
 	"github.com/dolthub/vitess/go/vt/vterrors"
 
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
@@ -187,7 +185,7 @@ func Proto3ResultsEqual(r1, r2 []*querypb.QueryResult) bool {
 		return false
 	}
 	for i, r := range r1 {
-		if !proto.Equal(r, r2[i]) {
+		if !r.EqualVT(r2[i]) {
 			return false
 		}
 	}
@@ -201,7 +199,7 @@ func Proto3QueryResponsesEqual(r1, r2 []*querypb.ResultWithError) bool {
 		return false
 	}
 	for i, r := range r1 {
-		if !proto.Equal(r, r2[i]) {
+		if !r.EqualVT(r2[i]) {
 			return false
 		}
 	}
@@ -214,7 +212,7 @@ func Proto3ValuesEqual(v1, v2 []*querypb.Value) bool {
 		return false
 	}
 	for i, v := range v1 {
-		if !proto.Equal(v, v2[i]) {
+		if !v.EqualVT(v2[i]) {
 			return false
 		}
 	}
@@ -227,7 +225,7 @@ func SplitQueryResponsePartsEqual(s1, s2 []*vtgatepb.SplitQueryResponse_Part) bo
 		return false
 	}
 	for i, s := range s1 {
-		if !proto.Equal(s, s2[i]) {
+		if !s.EqualVT(s2[i]) {
 			return false
 		}
 	}

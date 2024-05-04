@@ -20,13 +20,13 @@ limitations under the License.
 // service.
 
 syntax = "proto3";
-option go_package = "github.com/dolthub/vitess/go/vt/proto/topodata";
+option go_package = "github.com/dolthub/vitess/go/vt/proto/topodata;topodata";
 
 option java_package="io.vitess.proto";
 
 package dolthub.vt.topodata;
 
-import "dolthub/vt/time.proto";
+import "github.com/dolthub/vitess/proto/dolthub/vt/time.proto";
 
 // KeyRange describes a range of sharding keys, when range-based
 // sharding is used.

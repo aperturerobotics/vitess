@@ -19,8 +19,6 @@ package sqltypes
 import (
 	"reflect"
 
-	"google.golang.org/protobuf/proto"
-
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
 )
 
@@ -142,7 +140,7 @@ func FieldsEqual(f1, f2 []*querypb.Field) bool {
 		return false
 	}
 	for i, f := range f1 {
-		if !proto.Equal(f, f2[i]) {
+		if !f.EqualVT(f2[i]) {
 			return false
 		}
 	}
@@ -165,7 +163,7 @@ func (result *Result) Equal(other *Result) bool {
 		result.RowsAffected == other.RowsAffected &&
 		result.InsertID == other.InsertID &&
 		reflect.DeepEqual(result.Rows, other.Rows) &&
-		proto.Equal(result.Extras, other.Extras)
+		result.Extras.EqualVT(other.Extras)
 }
 
 // ResultsEqual compares two arrays of Result.

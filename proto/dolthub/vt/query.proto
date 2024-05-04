@@ -18,14 +18,15 @@ limitations under the License.
 // RPC calls to Vttablet.
 
 syntax = "proto3";
-option go_package = "github.com/dolthub/vitess/go/vt/proto/query";
+
+option go_package = "github.com/dolthub/vitess/go/vt/proto/query;query";
 
 package dolthub.vt.query;
 
 option java_package="io.vitess.proto";
 
-import "dolthub/vt/topodata.proto";
-import "dolthub/vt/vtrpc.proto";
+import "github.com/dolthub/vitess/proto/dolthub/vt/topodata.proto";
+import "github.com/dolthub/vitess/proto/dolthub/vt/vtrpc.proto";
 
 // Target describes what the client expects the tablet is.
 // If the tablet does not match, an error is returned.

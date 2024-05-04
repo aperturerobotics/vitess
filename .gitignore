@@ -83,6 +83,11 @@ releases
 dist/*
 py-vtdb*
 vthook*
-bin*
+binlog_*.go
 
 vtdataroot*
+
+vendor/
+node_modules/
+yarn.lock
+.tools/

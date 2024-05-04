@@ -23,8 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
 )
 
@@ -32,7 +30,7 @@ func TestProtoConversions(t *testing.T) {
 	v := TestValue(Int64, "1")
 	got := ValueToProto(v)
 	want := &querypb.Value{Type: Int64, Value: []byte("1")}
-	if !proto.Equal(got, want) {
+	if !got.EqualVT(want) {
 		t.Errorf("ValueToProto: %v, want %v", got, want)
 	}
 	gotback := ProtoToValue(got)
@@ -305,7 +303,7 @@ func TestBuildBindVariable(t *testing.T) {
 			t.Errorf("ToBindVar(%T(%v)) error: nil, want %s", tcase.in, tcase.in, tcase.err)
 			continue
 		}
-		if !proto.Equal(bv, tcase.out) {
+		if !bv.EqualVT(tcase.out) {
 			t.Errorf("ToBindVar(%T(%v)): %v, want %s", tcase.in, tcase.in, bv, tcase.out)
 		}
 	}

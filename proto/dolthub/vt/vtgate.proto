@@ -17,16 +17,15 @@ limitations under the License.
 // Data definitions for service vtgateservice.
 
 syntax = "proto3";
-option go_package = "github.com/dolthub/vitess/go/vt/proto/vtgate";
-
 package dolthub.vt.vtgate;
 
+option go_package = "github.com/dolthub/vitess/go/vt/proto/vtgate;vtgate";
 option java_package="io.vitess.proto";
 
-import "dolthub/vt/binlogdata.proto";
-import "dolthub/vt/query.proto";
-import "dolthub/vt/topodata.proto";
-import "dolthub/vt/vtrpc.proto";
+import "github.com/dolthub/vitess/proto/dolthub/vt/binlogdata.proto";
+import "github.com/dolthub/vitess/proto/dolthub/vt/query.proto";
+import "github.com/dolthub/vitess/proto/dolthub/vt/topodata.proto";
+import "github.com/dolthub/vitess/proto/dolthub/vt/vtrpc.proto";
 
 // TransactionMode controls the execution of distributed transaction
 // across multiple shards.
@@ -870,13 +869,13 @@ message VStreamRequest {
   // position specifies the starting point of the bin log positions
   // as well as the keyspace-shards to pull events from.
   // position is of the form 'ks1:0@MySQL56/<mysql_pos>|ks2:-80@MySQL56/<mysql_pos>'.
-  binlogdata.VGtid vgtid = 3;
-  binlogdata.Filter filter = 4;
+  .dolthub.vt.binlogdata.VGtid vgtid = 3;
+  .dolthub.vt.binlogdata.Filter filter = 4;
 }
 
 // VStreamResponse is streamed by VStream.
 message VStreamResponse {
-  repeated binlogdata.VEvent events = 1;
+  repeated .dolthub.vt.binlogdata.VEvent events = 1;
 }
 
 // UpdateStreamRequest is the payload to UpdateStream.

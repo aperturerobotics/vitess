@@ -19,8 +19,6 @@ package vterrors
 import (
 	"testing"
 
-	"google.golang.org/protobuf/proto"
-
 	vtrpcpb "github.com/dolthub/vitess/go/vt/proto/vtrpc"
 )
 
@@ -76,7 +74,7 @@ func TestVtRPCErrorFromVtError(t *testing.T) {
 	}}
 	for _, tcase := range testcases {
 		got := ToVTRPC(tcase.in)
-		if !proto.Equal(got, tcase.want) {
+		if !got.EqualVT(tcase.want) {
 			t.Errorf("VtRPCErrorFromVtError(%v): %v, want %v", tcase.in, got, tcase.want)
 		}
 	}

@@ -209,6 +209,20 @@ func yySpecialCommentMode(yylex interface{}) bool {
   srsAttr *SrsAttribute
 }
 
+// These precedence rules are there to handle shift-reduce conflicts.
+
+// STRING_TYPE_PREFIX_NON_KEYWORD is used to resolve shift-reduce conflicts occuring due to column_name symbol and
+// being able to use keywords like DATE and TIME as prefixes to strings to denote their type. The shift-reduce conflict occurrs because
+// after seeing one of these non-reserved keywords, if we see a STRING, then we can either shift to use the STRING typed rule in literal or
+// reduce the non-reserved keyword into column_name and eventually use a rule from simple_expr.
+// The way to fix this conflict is to give shifting higher precedence than reducing.
+// Adding no precedence also works, since shifting is the default, but it reports some conflicts
+// Precedence is also assined to shifting on STRING.
+// We also need to add a lower precedence to reducing the grammar symbol to non-reserved keywords.
+// In order to ensure lower precedence of reduction, this rule has to come before the precedence declaration of STRING.
+// This precedence should not be used anywhere else other than with non-reserved-keywords that are also used for type-casting a STRING.
+%nonassoc <str> STRING_TYPE_PREFIX_NON_KEYWORD
+
 %token LEX_ERROR
 
 // Special tokens
@@ -229,7 +243,8 @@ func yySpecialCommentMode(yylex interface{}) bool {
 %left <bytes> JOIN STRAIGHT_JOIN LEFT RIGHT INNER OUTER CROSS NATURAL USE FORCE
 %left <bytes> ON USING
 %token <empty> '(' ',' ')' '@' ':'
-%token <bytes> ID HEX STRING INTEGRAL FLOAT HEXNUM VALUE_ARG LIST_ARG COMMENT COMMENT_KEYWORD BIT_LITERAL
+%nonassoc <bytes> STRING
+%token <bytes> ID HEX INTEGRAL FLOAT HEXNUM VALUE_ARG LIST_ARG COMMENT COMMENT_KEYWORD BIT_LITERAL
 %token <bytes> NULL TRUE FALSE OFF
 %right <bytes> INTO
 
@@ -417,7 +432,7 @@ func yySpecialCommentMode(yylex interface{}) bool {
 %token <bytes> NVAR PASSWORD_LOCK
 
 %type <statement> command
-%type <selStmt> create_query_expression create_query_select_expression select_statement with_select select_or_set_op base_select base_select_no_cte select_statement_with_no_trailing_into
+%type <selStmt> create_query_expression create_query_select_expression select_statement with_select select_or_set_op base_select base_select_no_cte select_statement_with_no_trailing_into values_select_statement
 %type <selStmt> set_op intersect_stmt union_except_lhs union_except_rhs
 %type <statement> stream_statement insert_statement update_statement delete_statement set_statement trigger_body
 %type <statement> create_statement rename_statement drop_statement truncate_statement call_statement
@@ -439,6 +454,7 @@ func yySpecialCommentMode(yylex interface{}) bool {
 %type <declareHandlerConditions> declare_handler_condition_list
 %type <declareHandlerAction> declare_handler_action
 %type <bytes> signal_condition_value
+%type <bytes> char_or_character
 %type <str> trigger_time trigger_event
 %type <boolean> with_or_without
 %type <statement> alter_statement alter_table_statement alter_database_statement alter_event_statement alter_user_statement
@@ -662,6 +678,10 @@ command:
   {
     $$ = $1
   }
+| values_select_statement
+  {
+    $$ = $1
+  }
 | stream_statement
 | insert_statement
 | update_statement
@@ -730,6 +750,21 @@ select_statement:
     }
   }
 
+values_select_statement:
+  values_statement order_by_opt limit_opt
+  {
+    $$ = &Select{
+    	SelectExprs: SelectExprs{&StarExpr{}},
+    	From: TableExprs{&AliasedTableExpr{Expr: $1}},
+    	OrderBy: $2,
+    	Limit: $3,
+    }
+  }
+| openb values_select_statement closeb
+  {
+    $$ = $2
+  }
+
 select_statement_with_no_trailing_into:
   select_statement
   {
@@ -786,7 +821,6 @@ intersect_stmt:
     $$ = &SetOp{Type: $2, Left: $1, Right: $3}
   }
 
-// TODO: add (VALUES ROW(...), ROW(...), ...) support
 // base_select is either a simple SELECT or a SELECT wrapped in parentheses
 base_select:
   base_select_no_cte
@@ -937,6 +971,19 @@ common_table_expression:
 
 insert_statement:
   with_clause_opt insert_or_replace comment_opt ignore_opt into_table_name opt_partition_clause insert_data_alias on_dup_opt
+  {
+    // insert_data returns a *Insert pre-filled with Columns & Values
+    ins := $7
+    ins.Action = $2
+    ins.Comments = $3
+    ins.Ignore = $4
+    ins.Table = $5
+    ins.Partitions = $6
+    ins.OnDup = OnDup($8)
+    ins.With = $1
+    $$ = ins
+  }
+| with_clause_opt insert_or_replace comment_opt ignore_opt into_table_name opt_partition_clause insert_data_select on_dup_opt
   {
     // insert_data returns a *Insert pre-filled with Columns & Values
     ins := $7
@@ -2158,6 +2205,10 @@ authentication:
   {
     $$ = &Authentication{Plugin: string($3), Identity: string($5)}
   }
+| IDENTIFIED WITH STRING AS STRING
+  {
+    $$ = &Authentication{Plugin: string($3), Identity: string($5)}
+  }
 
 authentication_initial:
   IDENTIFIED BY RANDOM PASSWORD
@@ -3252,19 +3303,11 @@ time_type:
   }
 
 char_type:
-  CHAR char_length_opt
+  char_or_character char_length_opt
   {
     $$ = ColumnType{Type: string($1), Length: $2}
   }
-| CHARACTER char_length_opt
-  {
-    $$ = ColumnType{Type: string($1), Length: $2}
-  }
-| NATIONAL CHAR char_length_opt
-  {
-    $$ = ColumnType{Type: string($1) + " " + string($2), Length: $3}
-  }
-| NATIONAL CHARACTER char_length_opt
+| NATIONAL char_or_character char_length_opt
   {
     $$ = ColumnType{Type: string($1) + " " + string($2), Length: $3}
   }
@@ -3300,11 +3343,7 @@ char_type:
   {
     $$ = ColumnType{Type: string($1) + " " + string($2), Length: $3}
   }
-| NATIONAL CHAR VARYING char_length_opt
-  {
-    $$ = ColumnType{Type: string($1) + " " + string($2) + " " + string($3), Length: $4}
-  }
-| NATIONAL CHARACTER VARYING char_length_opt
+| NATIONAL char_or_character VARYING char_length_opt
   {
     $$ = ColumnType{Type: string($1) + " " + string($2) + " " + string($3), Length: $4}
   }
@@ -4070,6 +4109,10 @@ foreign_key_definition:
   CONSTRAINT id_or_non_reserved foreign_key_details
   {
     $$ = &ConstraintDefinition{Name: string($2), Details: $3}
+  }
+| CONSTRAINT foreign_key_details
+  {
+    $$ = &ConstraintDefinition{Details: $2}
   }
 | foreign_key_details
   {
@@ -6559,7 +6602,6 @@ table_factor:
 | table_function
 | json_table
 
-
 values_statement:
   VALUES row_list
   {
@@ -6567,14 +6609,19 @@ values_statement:
   }
 
 row_list:
-  ROW row_tuple
+  row_opt row_tuple
   {
     $$ = Values{$2}
   }
-| row_list ',' ROW row_tuple
+| row_list ',' row_opt row_tuple
   {
     $$ = append($$, $4)
   }
+
+row_opt:
+  {}
+| ROW
+  {}
 
 aliased_table_name:
   table_name aliased_table_options
@@ -8026,6 +8073,14 @@ convert_type:
   {
     $$ = &ConvertType{Type: string($1), Length: $2, Charset: string($3)}
   }
+| CHARACTER length_opt charset_opt
+  {
+    $$ = &ConvertType{Type: "CHAR", Length: $2, Charset: $3, Operator: CharacterSetStr}
+  }
+| CHARACTER length_opt ID
+  {
+    $$ = &ConvertType{Type: "CHAR", Length: $2, Charset: string($3)}
+  }
 | DATE
   {
     $$ = &ConvertType{Type: string($1)}
@@ -8041,6 +8096,14 @@ convert_type:
     $$.Scale = $2.Scale
   }
 | DOUBLE
+  {
+    $$ = &ConvertType{Type: string($1)}
+  }
+| DOUBLE PRECISION
+  {
+    $$ = &ConvertType{Type: string($1)}
+  }
+| REAL
   {
     $$ = &ConvertType{Type: string($1)}
   }
@@ -8079,6 +8142,16 @@ convert_type:
 | YEAR
   {
     $$ = &ConvertType{Type: string($1)}
+  }
+
+char_or_character:
+  CHAR
+  {
+    $$ = $1
+  }
+| CHARACTER
+  {
+    $$ = $1
   }
 
 expression_opt:
@@ -8190,6 +8263,18 @@ value:
   STRING
   {
     $$ = NewStrVal($1)
+  }
+| DATE STRING
+  {
+    $$ = NewStrVal($2)
+  }
+| TIME STRING
+  {
+    $$ = NewStrVal($2)
+  }
+| TIMESTAMP STRING
+  {
+    $$ = NewStrVal($2)
   }
 | HEX
   {
@@ -8365,7 +8450,7 @@ insert_data_alias:
   {
     $$ = $1
   }
-| insert_data_values as_opt table_alias column_list_opt
+| insert_data as_opt table_alias column_list_opt
   {
     $$ = $1
     // Rows is guarenteed to be an *AliasedValues here.
@@ -8385,13 +8470,19 @@ insert_data_alias:
 // Because the rules are together, the parser can keep shifting
 // the tokens until it disambiguates a as sql_id and select as keyword.
 insert_data:
-  insert_data_select
+  insert_data_values
   {
     $$ = $1
   }
-| insert_data_values
+| openb closeb insert_data_values
   {
-    $$ = $1
+    $3.Columns = []ColIdent{}
+    $$ = $3
+  }
+| openb ins_column_list closeb insert_data_values
+  {
+    $4.Columns = $2
+    $$ = $4
   }
 
 insert_data_select:
@@ -8419,14 +8510,9 @@ insert_data_values:
   {
     $$ = &Insert{Rows: &AliasedValues{Values: $2}}
   }
-| openb closeb value_or_values tuple_list
+| openb insert_data_values closeb
   {
-    $$ = &Insert{Columns: []ColIdent{}, Rows: &AliasedValues{Values: $4}}
-  }
-
-| openb ins_column_list closeb value_or_values tuple_list
-  {
-    $$ = &Insert{Columns: $2, Rows: &AliasedValues{Values: $5}}
+    $$ = $2
   }
 
 value_or_values:
@@ -8498,11 +8584,11 @@ tuple_list:
   }
 
 tuple_or_empty:
-  row_tuple
+  row_opt row_tuple
   {
-    $$ = $1
+    $$ = $2
   }
-| openb closeb
+| row_opt openb closeb
   {
     $$ = ValTuple{}
   }
@@ -9556,7 +9642,7 @@ non_reserved_keyword:
 | CURRENT
 | CURSOR_NAME
 | DATA
-| DATE
+| DATE %prec STRING_TYPE_PREFIX_NON_KEYWORD
 | DATETIME
 | DAY
 | DEALLOCATE
@@ -9769,8 +9855,8 @@ non_reserved_keyword:
 | THAN
 | THREAD_PRIORITY
 | TIES
-| TIME
-| TIMESTAMP
+| TIME %prec STRING_TYPE_PREFIX_NON_KEYWORD
+| TIMESTAMP %prec STRING_TYPE_PREFIX_NON_KEYWORD
 | TRANSACTION
 | TRIGGERS
 | TRUNCATE

@@ -17,6 +17,7 @@ limitations under the License.
 package mysql
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -71,6 +72,12 @@ type Handler interface {
 	// ConnectionClosed is called when a connection is closed.
 	ConnectionClosed(c *Conn)
 
+	// ConnectionAborted is called when a new connection cannot be fully established. For
+	// example, if a client connects to the server, but fails authentication, or can't
+	// negotiate an authentication handshake, this method will be called to let integrators
+	// know about the failed connection attempt.
+	ConnectionAborted(c *Conn, reason string) error
+
 	// ComInitDB is called once at the beginning to set db name,
 	// and subsequently for every ComInitDB event.
 	ComInitDB(c *Conn, schemaName string) error
@@ -80,7 +87,7 @@ type Handler interface {
 	// the first call to callback. So the Handler should not
 	// hang on to the byte slice.
 	ComQuery(c *Conn, query string, callback ResultSpoolFn) error
-	
+
 	// ComMultiQuery is called when a connection receives a query and the
 	// client supports MULTI_STATEMENT. It should process the first
 	// statement in |query| and return the remainder. It will be called
@@ -131,8 +138,8 @@ type ResultSpoolFn func(res *sqltypes.Result, more bool) error
 
 // ExtendedHandler is an extension to Handler to support additional protocols on top of MySQL.
 type ExtendedHandler interface {
-	// ComParsedQuery is called when a connection receives a query that has already been parsed. Note the contents 
-	// of the query slice may change after the first call to callback. So the Handler should not hang on to the byte 
+	// ComParsedQuery is called when a connection receives a query that has already been parsed. Note the contents
+	// of the query slice may change after the first call to callback. So the Handler should not hang on to the byte
 	// slice.
 	ComParsedQuery(c *Conn, query string, parsed sqlparser.Statement, callback ResultSpoolFn) error
 
@@ -218,7 +225,7 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 	salt, err := c.writeHandshakeV10(l.ServerVersion, l.authServer)
 	if err != nil {
 		if err != io.EOF {
-			log.Errorf("Cannot send HandshakeV10 packet to %s: %v", c, err)
+			l.handleConnectionError(c, fmt.Sprintf("Cannot send HandshakeV10 packet: %v", err))
 		}
 		return
 	}
@@ -228,13 +235,16 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 	if err != nil {
 		// Don't log EOF errors. They cause too much spam, same as main read loop.
 		if err != io.EOF {
-			log.Infof("Cannot read client handshake response from %s: %v, it may not be a valid MySQL client", c, err)
+			l.handleConnectionWarning(c, fmt.Sprintf(
+				"Cannot read client handshake response from %s: %v, "+
+					"it may not be a valid MySQL client", c, err))
 		}
 		return
 	}
 	user, authMethod, authResponse, err := l.parseClientHandshakePacket(c, true, response)
 	if err != nil {
-		log.Errorf("Cannot parse client handshake response from %s: %v", c, err)
+		l.handleConnectionError(c, fmt.Sprintf(
+			"Cannot parse client handshake response from %s: %v", c, err))
 		return
 	}
 
@@ -244,14 +254,16 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 		// SSL was enabled. We need to re-read the auth packet.
 		response, err = c.readEphemeralPacket()
 		if err != nil {
-			log.Errorf("Cannot read post-SSL client handshake response from %s: %v", c, err)
+			l.handleConnectionError(c, fmt.Sprintf(
+				"Cannot read post-SSL client handshake response from %s: %v", c, err))
 			return
 		}
 
 		// Returns copies of the data, so we can recycle the buffer.
 		user, authMethod, authResponse, err = l.parseClientHandshakePacket(c, false, response)
 		if err != nil {
-			log.Errorf("Cannot parse post-SSL client handshake response from %s: %v", c, err)
+			l.handleConnectionError(c, fmt.Sprintf(
+				"Cannot parse post-SSL client handshake response from %s: %v", c, err))
 			return
 		}
 		c.recycleReadPacket()
@@ -266,6 +278,7 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 	// See what auth method the AuthServer wants to use for that user.
 	authServerMethod, err := l.authServer.AuthMethod(user, conn.RemoteAddr().String())
 	if err != nil {
+		l.handleConnectionError(c, "auth server failed to determine auth method")
 		c.writeErrorPacketFromError(err)
 		return
 	}
@@ -278,7 +291,8 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 		// ValidateHash() method.
 		userData, err := l.authServer.ValidateHash(salt, user, authResponse, conn.RemoteAddr())
 		if err != nil {
-			log.Warningf("Error authenticating user using MySQL native password: %v", err)
+			l.handleConnectionWarning(c, fmt.Sprintf(
+				"Error authenticating user using MySQL native password: %v", err))
 			c.writeErrorPacketFromError(err)
 			return
 		}
@@ -297,20 +311,22 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 		data := make([]byte, 21)
 		data = append(salt, byte(0x00))
 		if err := c.writeAuthSwitchRequest(MysqlNativePassword, data); err != nil {
-			log.Errorf("Error writing auth switch packet for %s: %v", c, err)
+			l.handleConnectionError(c, fmt.Sprintf("Error writing auth switch packet for %s: %v", c, err))
 			return
 		}
 
 		response, err := c.readEphemeralPacket()
 		if err != nil {
-			log.Errorf("Error reading auth switch response for %s: %v", c, err)
+			l.handleConnectionError(c, fmt.Sprintf(
+				"Error reading auth switch response for %s: %v", c, err))
 			return
 		}
 		c.recycleReadPacket()
 
 		userData, err := l.authServer.ValidateHash(salt, user, response, conn.RemoteAddr())
 		if err != nil {
-			log.Warningf("Error authenticating user using MySQL native password: %v", err)
+			l.handleConnectionWarning(c, fmt.Sprintf(
+				"Error authenticating user using MySQL native password: %v", err))
 			c.writeErrorPacketFromError(err)
 			return
 		}
@@ -319,6 +335,7 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 
 	default:
 		// The server wants to use something else, re-negotiate.
+
 		// Switch our auth method to what the server wants.
 		// Dialog plugin expects an AskPassword prompt.
 		var data []byte
@@ -326,7 +343,8 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 			data = authServerDialogSwitchData()
 		}
 		if err := c.writeAuthSwitchRequest(authServerMethod, data); err != nil {
-			log.Errorf("Error writing auth switch packet for %s: %v", c, err)
+			l.handleConnectionError(c, fmt.Sprintf(
+				"Error writing auth switch packet for %s: %v", c, err))
 			return
 		}
 
@@ -334,6 +352,8 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 		// auth server.
 		userData, err := l.authServer.Negotiate(c, user, conn.RemoteAddr())
 		if err != nil {
+			l.handleConnectionWarning(c, fmt.Sprintf(
+				"Unable to negotiate authentication: %v", err))
 			c.writeErrorPacketFromError(err)
 			return
 		}
@@ -370,6 +390,22 @@ func (l *Listener) HandleConn(conn net.Conn, connectionID uint32, acceptTime tim
 		if err != nil {
 			return
 		}
+	}
+}
+
+// handleConnectionError logs |reason| as an error and notifies the handler that a connection has been aborted.
+func (l *Listener) handleConnectionError(c *Conn, reason string) {
+	log.Error(reason)
+	if err := l.handler.ConnectionAborted(c, reason); err != nil {
+		log.Errorf("unable to report connection aborted to handler: %s", err)
+	}
+}
+
+// handleConnectionWarning logs |reason| as a warning and notifies the handler that a connection has been aborted.
+func (l *Listener) handleConnectionWarning(c *Conn, reason string) {
+	log.Warning(reason)
+	if err := l.handler.ConnectionAborted(c, reason); err != nil {
+		log.Errorf("unable to report connection aborted to handler: %s", err)
 	}
 }
 

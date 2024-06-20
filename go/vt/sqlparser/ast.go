@@ -5448,6 +5448,10 @@ func NewBitVal(in []byte) *SQLVal {
 	return &SQLVal{Type: BitVal, Val: in}
 }
 
+// TODO: implement a NewDateVal()
+// TODO: implement a NewTimeVal()
+// TODO: implement a NewTimestampVal()
+
 // NewValArg builds a new ValArg.
 func NewValArg(in []byte) *SQLVal {
 	return &SQLVal{Type: ValArg, Val: in}
@@ -6838,15 +6842,21 @@ func VarScope(nameParts ...string) (string, SetScope, string, error) {
 				return VarScope(nameParts[0][:dotIdx], nameParts[0][dotIdx+1:])
 			}
 			// Session scope is inferred here, but not explicitly requested
-			return nameParts[0][2:], SetScope_Session, "", nil
+			return trimQuotes(nameParts[0][2:]), SetScope_Session, "", nil
 		} else if strings.HasPrefix(nameParts[0], "@") {
-			return nameParts[0][1:], SetScope_User, "", nil
+			varName := nameParts[0][1:]
+			if len(varName) > 0 {
+				varName = trimQuotes(varName)
+			}
+			return varName, SetScope_User, "", nil
 		} else {
 			return nameParts[0], SetScope_None, "", nil
 		}
 	case 2:
 		// `@user.var` is valid, so we check for it here.
-		if len(nameParts[0]) >= 2 && nameParts[0][0] == '@' && nameParts[0][1] != '@' &&
+		if len(nameParts[0]) >= 2  &&
+			nameParts[0][0] == '@' &&
+			nameParts[0][1] != '@' &&
 			!strings.HasPrefix(nameParts[1], "@") { // `@user.@var` is invalid though.
 			return fmt.Sprintf("%s.%s", nameParts[0][1:], nameParts[1]), SetScope_User, "", nil
 		}
@@ -6862,27 +6872,27 @@ func VarScope(nameParts ...string) (string, SetScope, string, error) {
 			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
 				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
 			}
-			return nameParts[1], SetScope_Global, nameParts[0][2:], nil
+			return trimQuotes(nameParts[1]), SetScope_Global, nameParts[0][2:], nil
 		case "@@persist":
 			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
 				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
 			}
-			return nameParts[1], SetScope_Persist, nameParts[0][2:], nil
+			return trimQuotes(nameParts[1]), SetScope_Persist, nameParts[0][2:], nil
 		case "@@persist_only":
 			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
 				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
 			}
-			return nameParts[1], SetScope_PersistOnly, nameParts[0][2:], nil
+			return trimQuotes(nameParts[1]), SetScope_PersistOnly, nameParts[0][2:], nil
 		case "@@session":
 			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
 				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
 			}
-			return nameParts[1], SetScope_Session, nameParts[0][2:], nil
+			return trimQuotes(nameParts[1]), SetScope_Session, nameParts[0][2:], nil
 		case "@@local":
 			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
 				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
 			}
-			return nameParts[1], SetScope_Session, nameParts[0][2:], nil
+			return trimQuotes(nameParts[1]), SetScope_Session, nameParts[0][2:], nil
 		default:
 			// This catches `@@@GLOBAL.sys_var`. Due to the earlier check, this does not error on `@user.var`.
 			if strings.HasPrefix(nameParts[0], "@") {
@@ -7215,8 +7225,13 @@ func formatID(buf *TrackedBuffer, original, lowered string) {
 		isDbSystemVariable = true
 	}
 
+	isUserVariable := false
+	if !isDbSystemVariable && len(original) > 0 && original[:1] == "@" {
+		isUserVariable = true
+	}
+
 	for i, c := range original {
-		if !(isLetter(uint16(c)) || c == '@') && (!isDbSystemVariable || !isCarat(uint16(c))) {
+		if !(isLetter(uint16(c)) || c == '@') && (!isDbSystemVariable || !isCarat(uint16(c))) && !isUserVariable {
 			if i == 0 || !isDigit(uint16(c)) {
 				goto mustEscape
 			}
@@ -7486,16 +7501,16 @@ func (node *SrsAttribute) Format(buf *TrackedBuffer) {
 	buf.Myprintf("description '%s'", node.Description)
 }
 
-// InjectableExpression is an expression that can accept a set of analyzed/resolved children. Used within InjectedExpr.
-type InjectableExpression interface {
+// Injectable is an expression that can accept a set of analyzed/resolved children. Used within InjectedExpr.
+type Injectable interface {
 	WithResolvedChildren(children []any) (any, error)
 }
 
 // InjectedExpr allows bypassing AST analysis. This is used by projects that rely on Vitess, but may not implement
 // MySQL's dialect.
 type InjectedExpr struct {
-	Expression InjectableExpression
-	Children   []Expr
+	Expression Injectable
+	Children   Exprs
 }
 
 var _ Expr = InjectedExpr{}
@@ -7514,5 +7529,26 @@ func (d InjectedExpr) Format(buf *TrackedBuffer) {
 		buf.WriteString(stringer.String())
 	} else {
 		buf.WriteString("InjectedExpr")
+	}
+}
+
+// InjectedStatement allows bypassing AST analysis. This is used by projects that rely on Vitess, but may not implement
+// MySQL's dialect.
+type InjectedStatement struct {
+	Statement  Injectable
+	Children   Exprs
+}
+
+var _ Statement = InjectedStatement{}
+
+// iStatement implements the Statement interface.
+func (d InjectedStatement) iStatement() {}
+
+// Format implements the Statement interface.
+func (d InjectedStatement) Format(buf *TrackedBuffer) {
+	if stringer, ok := d.Statement.(fmt.Stringer); ok {
+		buf.WriteString(stringer.String())
+	} else {
+		buf.WriteString("InjectedStatement")
 	}
 }

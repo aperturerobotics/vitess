@@ -382,6 +382,18 @@ var (
 			input: "select a from (select 1 as a from tbl1 union select 2 from tbl2) as t (a, b)",
 		},
 		{
+			input:  "select a from (values (1, 2), ('a', 'b')) as t (a, b)",
+			output: "select a from (values row(1, 2), row('a', 'b')) as t (a, b)",
+		},
+		{
+			input:  "select a from (values (1, 2), row('a', 'b')) as t (a, b)",
+			output: "select a from (values row(1, 2), row('a', 'b')) as t (a, b)",
+		},
+		{
+			input:  "select a from (values row(1, 2), ('a', 'b')) as t (a, b)",
+			output: "select a from (values row(1, 2), row('a', 'b')) as t (a, b)",
+		},
+		{
 			input: "select a from (values row(1, 2), row('a', 'b')) as t (a, b)",
 		},
 		{
@@ -392,6 +404,42 @@ var (
 		},
 		{
 			input: "select a from (values row(1, 2), row('a', 'b')) as t1 (w, x) join lateral (values row(3, 4), row('c', 'd')) as t2 (y, z)",
+		},
+		{
+			input:  "values row(1, 3), row(2, 2), row(3, 1)",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1))",
+		},
+		{
+			input:  "values (1, 3), (2, 2), (3, 1)",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1))",
+		},
+		{
+			input:  "values (1, 3), row(2, 2), (3, 1)",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1))",
+		},
+		{
+			input:  "values (1, 3), (2, 2), (3, 1) order by 1",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1)) order by 1 asc",
+		},
+		{
+			input:  "values (1, 3), (2, 2), (3, 1) order by 1 asc",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1)) order by 1 asc",
+		},
+		{
+			input:  "values (1, 3), (2, 2), (3, 1) order by 1 desc",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1)) order by 1 desc",
+		},
+		{
+			input:  "values (1, 3), (2, 2), (3, 1) limit 1",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1)) limit 1",
+		},
+		{
+			input:  "values (1, 3), (2, 2), (3, 1) order by 2 limit 2",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1)) order by 2 asc limit 2",
+		},
+		{
+			input:  "(((values (1, 3), (2, 2), (3, 1) order by 2 limit 2)))",
+			output: "select * from (values row(1, 3), row(2, 2), row(3, 1)) order by 2 asc limit 2",
 		},
 		{
 			input: "select a from t1, lateral (select b from t2) as sq",
@@ -1206,10 +1254,36 @@ var (
 		}, {
 			input:  "insert into a(a, b) value (1, ifnull(null, default(b)))",
 			output: "insert into a(a, b) values (1, ifnull(null, default(b)))",
-		}, {
+		},
+		{
 			input:  "insert into a value (1, ifnull(null, default(b)))",
 			output: "insert into a values (1, ifnull(null, default(b)))",
-		}, {
+		},
+		{
+			input:  "insert into xy values row (1, 1)",
+			output: "insert into xy values (1, 1)",
+		},
+		{
+			input:  "insert into xy values row (1, 1), row (2, 2)",
+			output: "insert into xy values (1, 1), (2, 2)",
+		},
+		{
+			input:  "insert into xy values (1, 1), row (2, 2)",
+			output: "insert into xy values (1, 1), (2, 2)",
+		},
+		{
+			input:  "insert into xy values row (1, 1), (2, 2)",
+			output: "insert into xy values (1, 1), (2, 2)",
+		},
+		{
+			input:  "insert into xy ((( values row (1, 1), row (2, 2) )))",
+			output: "insert into xy values (1, 1), (2, 2)",
+		},
+		{
+			input:  "insert into xy values row()",
+			output: "insert into xy values ()",
+		},
+		{
 			input: "insert /* qualified column list */ into a(a, b) values (1, 2)",
 		}, {
 			input:  "insert /* qualified columns */ into t (t.a, t.b) values (1, 2)",
@@ -1368,76 +1442,146 @@ var (
 			input: "set #simple\n b = 4",
 		}, {
 			input: "set character_set_results = utf8",
-		}, {
+		},
+		{
+			input:  "set @@`version` = true",
+			output: "set session version = true",
+		},
+		{
+			input:  "select @@`version` = true",
+			output: "select @@`version` = true",
+		},
+		{
 			input:  "set @@session.autocommit = true",
 			output: "set session autocommit = true",
-		}, {
+		},
+		{
 			input:  "set @@session.`autocommit` = true",
-			output: "set session `autocommit` = true",
-		}, {
+			output: "set session autocommit = true",
+		},
+		{
+			input:  "select @@session.`autocommit` = true",
+			output: "select @@session.`autocommit` = true",
+		},
+		{
 			input:  "set @@session.autocommit = ON",
 			output: "set session autocommit = 'ON'",
-		}, {
+		},
+		{
 			input:  "set @@session.autocommit= OFF",
 			output: "set session autocommit = 'OFF'",
-		}, {
+		},
+		{
 			input:  "set session autocommit = ON",
 			output: "set session autocommit = 'ON'",
-		}, {
+		},
+		{
 			input:  "set session autocommit := ON",
 			output: "set session autocommit = 'ON'",
-		}, {
+		},
+		{
 			input:  "set global autocommit = OFF",
 			output: "set global autocommit = 'OFF'",
-		}, {
+		},
+		{
 			input:  "set @@global.optimizer_prune_level = 1",
 			output: "set global optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input: "set global optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input:  "set @@persist.optimizer_prune_level = 1",
 			output: "set persist optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input: "set persist optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input:  "set @@persist_only.optimizer_prune_level = 1",
 			output: "set persist_only optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input: "set persist_only optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input:  "set @@local.optimizer_prune_level = 1",
 			output: "set session optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input:  "set local optimizer_prune_level = 1",
 			output: "set session optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input:  "set @@optimizer_prune_level = 1",
 			output: "set session optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input: "set session optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input:  "set @@optimizer_prune_level = 1, @@global.optimizer_search_depth = 62",
 			output: "set session optimizer_prune_level = 1, global optimizer_search_depth = 62",
-		}, {
+		},
+		{
 			input:  "set @@GlObAl.optimizer_prune_level = 1",
 			output: "set global optimizer_prune_level = 1",
-		}, {
+		},
+		{
 			input: "set @user.var = 1",
-		}, {
+		},
+		{
 			input: "set @user.var.name = 1",
-		}, {
+		},
+		{
 			input:  "set @user.var.name := 1",
 			output: "set @user.var.name = 1",
-		}, {
+		},
+		{
+			input:  "set @`user var` = 1",
+			output: "set @user var = 1",
+		},
+		{
+			input:  "select @`user var`",
+			output: "select @`user var`",
+		},
+		{
+			input:  "set @user.`var` = 1",
+			output: "set @user.var = 1",
+		},
+		{
+			input:  "select @user.`var`",
+			output: "select @user.var",
+		},
+		{
+			input:  "set @`user`.`var` = 1",
+			output: "set @`user`.var = 1",
+		},
+		{
+			input:  "select @`user`.`var`",
+			output: "select @`user`.var",
+		},
+		{
+			input:  "set @abc.def.`ghi` = 300",
+			output: "set @abc.def.ghi = 300",
+		},
+		{
+			input:  "select @abc.def.`ghi`",
+			output: "select @abc.def.ghi",
+		},
+		{
 			input:  "set autocommit = on",
 			output: "set autocommit = 'on'",
-		}, {
+		},
+		{
 			input:  "set autocommit = off",
 			output: "set autocommit = 'off'",
-		}, {
+		},
+		{
 			input:  "set autocommit = off, foo = 1",
 			output: "set autocommit = 'off', foo = 1",
-		}, {
+		},
+		{
 			input:  "set names utf8 collate foo",
 			output: "set names 'utf8'",
 		}, {
@@ -1657,6 +1801,9 @@ var (
 			input: "alter table a add spatial index idx (id)",
 		}, {
 			input:  "alter table a add foreign key (x) references y(z)",
+			output: "alter table a add foreign key (x) references y (z)",
+		}, {
+			input:  "alter table a add constraint foreign key (x) references y(z)",
 			output: "alter table a add foreign key (x) references y (z)",
 		}, {
 			input:  "alter table a add constraint abc foreign key country_code (country_code) REFERENCES premium_country (country_code)",
@@ -2853,6 +3000,9 @@ var (
 			input:  "CREATE USER UserName@localhost ATTRIBUTE '{\"attr\": \"attr_text\"}'",
 			output: "create user `UserName`@`localhost` attribute '{\"attr\": \"attr_text\"}'",
 		}, {
+			input:  "CREATE USER 'UserName'@'%' IDENTIFIED WITH 'caching_sha2_password' AS 'xyz0123'",
+			output: "create user `UserName`@`%` identified with caching_sha2_password as 'xyz0123'",
+		}, {
 			input:  "ALTER USER IF EXISTS foo@bar IDENTIFIED BY 'password1';",
 			output: "alter user if exists `foo`@`bar` identified by 'password1'",
 		}, {
@@ -3320,13 +3470,28 @@ var (
 		}, {
 			input:  "SELECT now() WHERE now() > '2019-04-04 13:25:44' INTO @late",
 			output: "select now() where now() > '2019-04-04 13:25:44' into @late",
-		}, {
+		},
+		{
 			input:  "SELECT * FROM (VALUES ROW(2,4,8)) AS t INTO @x,@y,@z",
 			output: "select * from (values row(2, 4, 8)) as t into @x, @y, @z",
-		}, {
+		},
+		{
 			input:  "SELECT * FROM (VALUES ROW(2,4,8)) AS t(a,b,c) INTO @x,@y,@z",
 			output: "select * from (values row(2, 4, 8)) as t (a, b, c) into @x, @y, @z",
-		}, {
+		},
+		{
+			input:  "SELECT * FROM (VALUES (2,4,8)) AS t INTO @x,@y,@z",
+			output: "select * from (values row(2, 4, 8)) as t into @x, @y, @z",
+		},
+		{
+			input:  "SELECT * FROM (VALUES (2,4,8)) AS t(a,b,c) INTO @x,@y,@z",
+			output: "select * from (values row(2, 4, 8)) as t (a, b, c) into @x, @y, @z",
+		},
+		{
+			input:  "SELECT * FROM (VALUES (1, 2, 3), (4, 5, 6), (7, 8, 9)) t",
+			output: "select * from (values row(1, 2, 3), row(4, 5, 6), row(7, 8, 9)) as t",
+		},
+		{
 			input:  "SELECT id FROM mytable ORDER BY id DESC LIMIT 1 INTO @myvar",
 			output: "select id from mytable order by id desc limit 1 into @myvar",
 		}, {
@@ -3969,6 +4134,55 @@ var (
 				"\ti int\n" +
 				") insert_method last",
 		},
+
+		// Date, Time, and Timestamp literals
+		{
+			input:  "select date '2020-10-01'",
+			output: "select '2020-10-01'",
+		},
+		{
+			input:  "select time '2020-10-01'",
+			output: "select '2020-10-01'",
+		},
+		{
+			input:  "select timestamp '2020-10-01'",
+			output: "select '2020-10-01'",
+		},
+
+		{
+			input:  "select date'2020-10-01'",
+			output: "select '2020-10-01'",
+		},
+		{
+			input:  "select time'2020-10-01'",
+			output: "select '2020-10-01'",
+		},
+		{
+			input:  "select timestamp'2020-10-01'",
+			output: "select '2020-10-01'",
+		},
+
+		{
+			input:  "select (date '2020-10-01')",
+			output: "select ('2020-10-01')",
+		},
+		{
+			input:  "select (time '2020-10-01')",
+			output: "select ('2020-10-01')",
+		},
+		{
+			input:  "select (timestamp '2020-10-01')",
+			output: "select ('2020-10-01')",
+		},
+
+		{
+			input:  "insert into t values (date '2020-10-01'), (time '2020-10-01'), (timestamp '2020-10-01')",
+			output: "insert into t values ('2020-10-01'), ('2020-10-01'), ('2020-10-01')",
+		},
+		{
+			input:  "select * from (values row(date '2020-10-01', time '12:34:56', timestamp '2001-02-03 12:34:56')) t;",
+			output: "select * from (values row('2020-10-01', '12:34:56', '2001-02-03 12:34:56')) as t",
+		},
 	}
 
 	// Any tests that contain multiple statements within the body (such as BEGIN/END blocks) should go here.
@@ -4295,6 +4509,20 @@ end`,
 		},
 	}
 )
+
+// TestSingleSQL is a helper function to test a single SQL statement.
+func TestSingleSQL(t *testing.T) {
+	t.Skip()
+	tests := []parseTest{
+		{
+			input:  "select @`user var`",
+			output: "select @`user var`",
+		},
+	}
+	for _, tcase := range tests {
+		runParseTestCase(t, tcase)
+	}
+}
 
 func TestValid(t *testing.T) {
 	validSQL = append(validSQL, validMultiStatementSql...)
@@ -4959,6 +5187,7 @@ func TestInvalid(t *testing.T) {
 	invalidSQL := []struct {
 		input string
 		err   string
+		skip  bool
 	}{
 		{
 			input: "SET @foo = `o` `ne`;",
@@ -5128,6 +5357,15 @@ func TestInvalid(t *testing.T) {
 		{
 			// TODO: should work
 			input: "select * from tbl into outfile 'outfile.txt' lines starting by 'd' terminated by 'e' starting by 'd' terminated by 'e'",
+			err:   "syntax error",
+		},
+
+		{
+			input: "select date 20010203",
+			err:   "syntax error",
+		},
+		{
+			input: "select date concat('2001-', '02-', '03')",
 			err:   "syntax error",
 		},
 	}
@@ -5918,8 +6156,24 @@ func TestFunctionCalls(t *testing.T) {
 			output: "select CAST(foo as DOUBLE)",
 		},
 		{
+			input:  "SELECT CAST(foo AS DOUBLE PRECISION)",
+			output: "select CAST(foo as DOUBLE)",
+		},
+		{
+			input:  "SELECT CAST(foo AS REAL)",
+			output: "select CAST(foo as REAL)",
+		},
+		{
 			input:  "SELECT CAST(foo AS FLOAT)",
 			output: "select CAST(foo as FLOAT)",
+		},
+		{
+			input:  "SELECT CAST(foo AS CHARACTER)",
+			output: "select CAST(foo as CHAR)",
+		},
+		{
+			input:  "SELECT CAST(foo AS CHARACTER(100))",
+			output: "select CAST(foo as CHAR(100))",
 		},
 		{
 			input:  "SELECT POSITION('abc' in 'xyz')",

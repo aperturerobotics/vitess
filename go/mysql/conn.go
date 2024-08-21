@@ -18,6 +18,7 @@ package mysql
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/trace"
 	"strings"
 	"sync"
 	"time"
@@ -279,7 +281,9 @@ func (c *Conn) FlushBuffer() error {
 
 // flush flushes the written data to the socket.
 // This must be called to terminate startBuffering.
-func (c *Conn) flush() error {
+func (c *Conn) flush(ctx context.Context) error {
+	defer trace.StartRegion(ctx, "spool-results").End()
+
 	if c.bufferedWriter == nil {
 		return nil
 	}
@@ -307,7 +311,8 @@ func (c *Conn) getReader() io.Reader {
 	return c.Conn
 }
 
-func (c *Conn) readHeaderFrom(r io.Reader) (int, error) {
+func (c *Conn) readHeaderFrom(ctx context.Context, r io.Reader) (int, error) {
+	defer trace.StartRegion(ctx, "read-header")
 	var header [4]byte
 	// Note io.ReadFull will return two different types of errors:
 	// 1. if the socket is already closed, and the go runtime knows it,
@@ -346,14 +351,15 @@ func (c *Conn) readHeaderFrom(r io.Reader) (int, error) {
 // returned, and it may not be io.EOF. If the connection closes while
 // we are stuck waiting for data, an error will also be returned, and
 // it most likely will be io.EOF.
-func (c *Conn) readEphemeralPacket() ([]byte, error) {
+func (c *Conn) readEphemeralPacket(ctx context.Context) ([]byte, error) {
+	defer trace.StartRegion(ctx, "read-ephemeral-packet")
 	if c.currentEphemeralPolicy != ephemeralUnused {
 		panic(vterrors.Errorf(vtrpc.Code_INTERNAL, "readEphemeralPacket: unexpected currentEphemeralPolicy: %v", c.currentEphemeralPolicy))
 	}
 
 	r := c.getReader()
 
-	length, err := c.readHeaderFrom(r)
+	length, err := c.readHeaderFrom(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +388,7 @@ func (c *Conn) readEphemeralPacket() ([]byte, error) {
 		return nil, vterrors.Wrapf(err, "io.ReadFull(packet body of length %v) failed", length)
 	}
 	for {
-		next, err := c.readOnePacket()
+		next, err := c.readOnePacket(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -406,14 +412,14 @@ func (c *Conn) readEphemeralPacket() ([]byte, error) {
 // so we do't buffer the SSL negotiation packet. As a shortcut, only
 // packets smaller than MaxPacketSize can be read here.
 // This function usually shouldn't be used - use readEphemeralPacket.
-func (c *Conn) readEphemeralPacketDirect() ([]byte, error) {
+func (c *Conn) readEphemeralPacketDirect(ctx context.Context) ([]byte, error) {
 	if c.currentEphemeralPolicy != ephemeralUnused {
 		panic(vterrors.Errorf(vtrpc.Code_INTERNAL, "readEphemeralPacketDirect: unexpected currentEphemeralPolicy: %v", c.currentEphemeralPolicy))
 	}
 
 	var r io.Reader = c.Conn
 
-	length, err := c.readHeaderFrom(r)
+	length, err := c.readHeaderFrom(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -452,9 +458,9 @@ func (c *Conn) recycleReadPacket() {
 }
 
 // readOnePacket reads a single packet into a newly allocated buffer.
-func (c *Conn) readOnePacket() ([]byte, error) {
+func (c *Conn) readOnePacket(ctx context.Context) ([]byte, error) {
 	r := c.getReader()
-	length, err := c.readHeaderFrom(r)
+	length, err := c.readHeaderFrom(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -474,9 +480,9 @@ func (c *Conn) readOnePacket() ([]byte, error) {
 // readPacket reads a packet from the underlying connection.
 // It re-assembles packets that span more than one message.
 // This method returns a generic error, not a SQLError.
-func (c *Conn) readPacket() ([]byte, error) {
+func (c *Conn) readPacket(ctx context.Context) ([]byte, error) {
 	// Optimize for a single packet case.
-	data, err := c.readOnePacket()
+	data, err := c.readOnePacket(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +494,7 @@ func (c *Conn) readPacket() ([]byte, error) {
 
 	// There is more than one packet, read them all.
 	for {
-		next, err := c.readOnePacket()
+		next, err := c.readOnePacket(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -511,8 +517,9 @@ func (c *Conn) readPacket() ([]byte, error) {
 // it is the public API version, that returns a SQLError.
 // The memory for the packet is always allocated, and it is owned by the caller
 // after this function returns.
-func (c *Conn) ReadPacket() ([]byte, error) {
-	result, err := c.readPacket()
+func (c *Conn) ReadPacket(ctx context.Context) ([]byte, error) {
+	defer trace.StartRegion(ctx, "read-packet").End()
+	result, err := c.readPacket(ctx)
 	if err != nil {
 		return nil, NewSQLError(CRServerLost, SSUnknownSQLState, "%v", err)
 	}
@@ -803,7 +810,7 @@ func (c *Conn) LoadInfile(file string) (io.ReadCloser, error) {
 		return nil, err
 	}
 
-	err = c.flush()
+	err = c.flush(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -814,7 +821,7 @@ func (c *Conn) LoadInfile(file string) (io.ReadCloser, error) {
 	go func() {
 		defer wg.Done()
 		// Read contents from client response, write it to |writer|.
-		data, err := c.readEphemeralPacket()
+		data, err := c.readEphemeralPacket(context.Background())
 		if err != nil {
 			writer.CloseWithError(err)
 			return
@@ -830,7 +837,7 @@ func (c *Conn) LoadInfile(file string) (io.ReadCloser, error) {
 				drain = true
 			}
 			c.recycleReadPacket()
-			data, err = c.readEphemeralPacket()
+			data, err = c.readEphemeralPacket(context.Background())
 			if err != nil {
 				writer.CloseWithError(err)
 				return
@@ -868,7 +875,7 @@ func (c *Conn) HandleLoadDataLocalQuery(tmpdir string, tmpfileName string, file 
 		return err
 	}
 
-	err = c.flush()
+	err = c.flush(context.Background())
 	if err != nil {
 		return err
 	}
@@ -882,7 +889,7 @@ func (c *Conn) HandleLoadDataLocalQuery(tmpdir string, tmpfileName string, file 
 
 	defer f.Close()
 
-	fileData, err := c.readEphemeralPacket()
+	fileData, err := c.readEphemeralPacket(context.Background())
 	if err != nil {
 		return err
 	}
@@ -895,7 +902,7 @@ func (c *Conn) HandleLoadDataLocalQuery(tmpdir string, tmpfileName string, file 
 
 		c.recycleReadPacket()
 
-		fileData, err = c.readEphemeralPacket()
+		fileData, err = c.readEphemeralPacket(context.Background())
 	}
 
 	c.recycleReadPacket()
@@ -920,9 +927,9 @@ const batchSize = 128
 
 // handleNextCommand is called in the server loop to process
 // incoming packets.
-func (c *Conn) handleNextCommand(handler Handler) error {
+func (c *Conn) handleNextCommand(ctx context.Context, handler Handler) error {
 	c.sequence = 0
-	data, err := c.readEphemeralPacket()
+	data, err := c.readEphemeralPacket(ctx)
 	if err != nil {
 		// Don't log EOF errors. They cause too much spam.
 		// Note the EOF detection is not 100%
@@ -970,14 +977,18 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 		queryStart := time.Now()
 		query := c.parseComQuery(data)
 
+		ctx, task := trace.NewTask(ctx, "ComQuery")
+		trace.Log(ctx, "query", query)
+		defer task.End()
+
 		c.recycleReadPacket()
 
 		multiStatements := !c.DisableClientMultiStatements && c.Capabilities&CapabilityClientMultiStatements != 0
 
 		var err error
 
-		for query, err = c.execQuery(query, handler, multiStatements); err == nil && query != ""; {
-			query, err = c.execQuery(query, handler, multiStatements)
+		for query, err = c.execQuery(ctx, query, handler, multiStatements); err == nil && query != ""; {
+			query, err = c.execQuery(ctx, query, handler, multiStatements)
 		}
 		if err != nil {
 			return err
@@ -985,7 +996,7 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 
 		timings.Record(queryTimingKey, queryStart)
 
-		if err := c.flush(); err != nil {
+		if err := c.flush(ctx); err != nil {
 			log.Errorf("Conn %v: Flush() failed: %v", c.ID(), err)
 			return err
 		}
@@ -1001,7 +1012,7 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 		}
 
 		sql := fmt.Sprintf("SELECT * FROM %s LIMIT 0;", formatID(table))
-		err = handler.ComQuery(c, sql, func(qr *sqltypes.Result, more bool) error {
+		err = handler.ComQuery(ctx, c, sql, func(qr *sqltypes.Result, more bool) error {
 			// only send meta data, no rows
 			if len(qr.Fields) == 0 {
 				return NewSQLErrorFromError(errors.New("unexpected: query ended without fields and no error"))
@@ -1074,43 +1085,49 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 			return nil
 		}
 
-		// Populate PrepareData
-		c.StatementID++
-		prepare := &PrepareData{
-			StatementID: c.StatementID,
-			PrepareStmt: query,
-		}
-
 		var err error
 		var statement sqlparser.Statement
-		var remainder string
-
 		parserOptions, err := handler.ParserOptionsForConnection(c)
 		if err != nil {
 			log.Errorf("unable to determine parser options for current connection: %s", err.Error())
 			return err
 		}
 
+		var queries []string
 		if !c.DisableClientMultiStatements && c.Capabilities&CapabilityClientMultiStatements != 0 {
-			var ri int
-			statement, ri, err = sqlparser.ParseOneWithOptions(query, parserOptions)
-			if ri < len(query) {
-				remainder = query[ri:]
+			queries, err = sqlparser.SplitStatementToPieces(query)
+			if err != nil {
+				log.Errorf("error splitting query: %v", c, err)
+				if werr := c.writeErrorPacketFromError(err); werr != nil {
+					// If we can't even write the error, we're done.
+					log.Errorf("Error writing query error to %s: %v", c, werr)
+					return werr
+				}
+				return nil
+			}
+			if len(queries) != 1 {
+				err := fmt.Errorf("cannot prepare multiple statements")
+				if werr := c.writeErrorPacketFromError(err); werr != nil {
+					// If we can't even write the error, we're done.
+					log.Errorf("Error writing query error to %s: %v", c, werr)
+					return werr
+				}
+				return nil
 			}
 		} else {
-			statement, err = sqlparser.ParseWithOptions(query, parserOptions)
+			queries = []string{query}
 		}
+
+		// Populate PrepareData
+		c.StatementID++
+		prepare := &PrepareData{
+			StatementID: c.StatementID,
+			PrepareStmt: queries[0],
+		}
+
+		statement, err = sqlparser.ParseWithOptions(ctx, query, parserOptions)
 		if err != nil {
 			log.Errorf("Error while parsing prepared statement: %s", err.Error())
-			if werr := c.writeErrorPacketFromError(err); werr != nil {
-				// If we can't even write the error, we're done.
-				log.Errorf("Error writing query error to %s: %v", c, werr)
-				return werr
-			}
-			return nil
-		}
-		if remainder != "" {
-			err := fmt.Errorf("can not prepare multiple statements")
 			if werr := c.writeErrorPacketFromError(err); werr != nil {
 				// If we can't even write the error, we're done.
 				log.Errorf("Error writing query error to %s: %v", c, werr)
@@ -1139,7 +1156,7 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 
 		c.PrepareData[c.StatementID] = prepare
 
-		fld, err := handler.ComPrepare(c, query, prepare)
+		fld, err := handler.ComPrepare(ctx, c, query, prepare)
 		if err != nil {
 			log.Errorf("unable to prepare query: %s", err.Error())
 			if werr := c.writeErrorPacketFromError(err); werr != nil {
@@ -1150,7 +1167,7 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 			return nil
 		}
 
-		if err := c.writePrepare(fld, c.PrepareData[c.StatementID]); err != nil {
+		if err := c.writePrepare(ctx, fld, c.PrepareData[c.StatementID]); err != nil {
 			return err
 		}
 	case ComStmtExecute:
@@ -1177,7 +1194,7 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 				log.Error("Error writing query error to client %v: %v", c.ConnectionID, werr)
 				return werr
 			}
-			return c.flush()
+			return c.flush(ctx)
 		}
 
 		if stmtID != uint32(0) {
@@ -1189,12 +1206,12 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 		}
 		queryStart := time.Now()
 
-		if err = c.execPrepareStatement(stmtID, cursorType, handler); err != nil {
+		if err = c.execPrepareStatement(ctx, stmtID, cursorType, handler); err != nil {
 			return err
 		}
 
 		timings.Record(queryTimingKey, queryStart)
-		if err := c.flush(); err != nil {
+		if err := c.flush(ctx); err != nil {
 			log.Errorf("Conn %v: Flush() failed: %v", c.ID(), err)
 			return err
 		}
@@ -1280,7 +1297,7 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 				log.Error("Error writing error packet to client: %v", werr)
 				return werr
 			}
-			return c.flush()
+			return c.flush(ctx)
 		}
 
 		// fetching from wrong statement
@@ -1290,9 +1307,8 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 				log.Error("Error writing error packet to client: %v", err)
 				return werr
 			}
-			return c.flush()
+			return c.flush(ctx)
 		}
-
 
 		// There is always a pending result set, because we prefetch it to detect EOF.
 		// When we detect EOF, we set c.cs = nil.
@@ -1338,7 +1354,7 @@ func (c *Conn) handleNextCommand(handler Handler) error {
 		if c.cs == nil {
 			c.StatusFlags &= ^uint16(ServerCursorLastRowSent)
 		}
-		if err := c.flush(); err != nil {
+		if err := c.flush(ctx); err != nil {
 			log.Errorf("Conn %v: Flush() failed: %v", c.ID(), err)
 			return err
 		}
@@ -1421,7 +1437,7 @@ func (c *Conn) handleComBinlogDumpGTID(handler Handler, data []byte) (kontinue b
 
 	c.startWriterBuffering()
 	defer func() {
-		if err := c.flush(); err != nil {
+		if err := c.flush(context.Background()); err != nil {
 			log.Errorf("conn %v: flush() failed: %v", c.ID(), err)
 			kontinue = false
 		}
@@ -1434,6 +1450,7 @@ func (c *Conn) handleComBinlogDumpGTID(handler Handler, data []byte) (kontinue b
 	}
 	if err := binlogReplicaHandler.ComBinlogDumpGTID(c, logFile, logPos, position.GTIDSet); err != nil {
 		log.Error(err.Error())
+		c.writeErrorPacketFromError(err)
 		return false
 	}
 	return kontinue
@@ -1480,7 +1497,9 @@ func formatID(original string) string {
 	return sb.String()
 }
 
-func (c *Conn) execQuery(query string, handler Handler, multiStatements bool) (string, error) {
+func (c *Conn) execQuery(ctx context.Context, query string, handler Handler, multiStatements bool) (string, error) {
+	defer trace.StartRegion(ctx, "query").End()
+
 	fieldSent := false
 	// sendFinished is set if the response should just be an OK packet.
 	sendFinished := false
@@ -1525,9 +1544,9 @@ func (c *Conn) execQuery(query string, handler Handler, multiStatements bool) (s
 	var remainder string
 
 	if multiStatements {
-		remainder, err = handler.ComMultiQuery(c, query, resultsCB)
+		remainder, err = handler.ComMultiQuery(ctx, c, query, resultsCB)
 	} else {
-		err = handler.ComQuery(c, query, resultsCB)
+		err = handler.ComQuery(ctx, c, query, resultsCB)
 	}
 
 	// If no field was sent, we expect an error.
@@ -1567,13 +1586,13 @@ func (c *Conn) execQuery(query string, handler Handler, multiStatements bool) (s
 // execPrepareStatement runs the query identified by the statement ID, and writes the expected packets to the connection
 // If the client requests that a cursor be opened, we should only write the fields, and wait for subsequent fetch
 // requests to write the rows from the result set.
-func (c *Conn) execPrepareStatement(stmtID uint32, cursorType byte, handler Handler) error {
+func (c *Conn) execPrepareStatement(ctx context.Context, stmtID uint32, cursorType byte, handler Handler) error {
 	prepare := c.PrepareData[stmtID]
 	if cursorType == NoCursor {
 		fieldSent := false
 		sendFinished := false // sendFinished is set if the response should just be an OK packet.
 
-		err := handler.ComStmtExecute(c, prepare, func(qr *sqltypes.Result) error {
+		err := handler.ComStmtExecute(ctx, c, prepare, func(qr *sqltypes.Result) error {
 			if sendFinished {
 				// Failsafe: Unreachable if server is well-behaved.
 				return io.EOF
@@ -1639,7 +1658,7 @@ func (c *Conn) execPrepareStatement(stmtID uint32, cursorType byte, handler Hand
 				done <- err
 				close(done)
 			}()
-			err = handler.ComStmtExecute(c, prepare, func(qr *sqltypes.Result) error {
+			err = handler.ComStmtExecute(ctx, c, prepare, func(qr *sqltypes.Result) error {
 				// block until query results are sent or receive signal to quit
 				var qerr error
 				select {

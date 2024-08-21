@@ -19,11 +19,13 @@ package sqlparser
 //go:generate goyacc -o sql.go sql.y
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"runtime/trace"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,14 +104,16 @@ type ParserOptions struct {
 // is partially parsed but still contains a syntax error, the
 // error is ignored and the DDL is returned anyway.
 func Parse(sql string) (Statement, error) {
-	return ParseWithOptions(sql, ParserOptions{})
+	return ParseWithOptions(context.Background(), sql, ParserOptions{})
 }
 
 // ParseWithOptions fully parses the SQL in |sql|, using any custom options specified
 // in |options|, and returns a Statement, which is the AST representation of the query.
 // If a DDL statement is partially parsed but contains a syntax error, the
 // error is ignored and the DDL is returned anyway.
-func ParseWithOptions(sql string, options ParserOptions) (Statement, error) {
+func ParseWithOptions(ctx context.Context, sql string, options ParserOptions) (Statement, error) {
+	defer trace.StartRegion(ctx, "ParseWithOptions").End()
+
 	tokenizer := NewStringTokenizer(sql)
 	if options.AnsiQuotes {
 		tokenizer = NewStringTokenizerForAnsiQuotes(sql)
@@ -120,15 +124,17 @@ func ParseWithOptions(sql string, options ParserOptions) (Statement, error) {
 // ParseOne parses the first SQL statement in the given string and returns the
 // index of the start of the next statement in |sql|. If there was only one
 // statement in |sql|, the value of the returned index will be |len(sql)|.
-func ParseOne(sql string) (Statement, int, error) {
-	return ParseOneWithOptions(sql, ParserOptions{})
+func ParseOne(ctx context.Context, sql string) (Statement, int, error) {
+	return ParseOneWithOptions(ctx, sql, ParserOptions{})
 }
 
 // ParseOneWithOptions parses the first SQL statement in |sql|, using any parsing
 // options specified in |options|, and returns the parsed Statement, along with
 // the index of the start of the next statement in |sql|. If there was only one
 // statement in |sql|, the value of the returned index will be |len(sql)|.
-func ParseOneWithOptions(sql string, options ParserOptions) (Statement, int, error) {
+func ParseOneWithOptions(ctx context.Context, sql string, options ParserOptions) (Statement, int, error) {
+	defer trace.StartRegion(ctx, "ParseOneWithOptions").End()
+
 	tokenizer := NewStringTokenizer(sql)
 	if options.AnsiQuotes {
 		tokenizer = NewStringTokenizerForAnsiQuotes(sql)
@@ -143,7 +149,7 @@ func ParseOneWithOptions(sql string, options ParserOptions) (Statement, int, err
 		}
 	}
 
-	return tree, tokenizer.Position, nil
+	return tree, tokenizer.Position-1, nil
 }
 
 func parseTokenizer(sql string, tokenizer *Tokenizer) (Statement, error) {
@@ -440,6 +446,7 @@ func (*Rollback) iStatement()          {}
 func (*Flush) iStatement()             {}
 func (*OtherRead) iStatement()         {}
 func (*OtherAdmin) iStatement()        {}
+func (*PurgeBinaryLogs) iStatement()   {}
 func (*BeginEndBlock) iStatement()     {}
 func (*CaseStatement) iStatement()     {}
 func (*IfStatement) iStatement()       {}
@@ -3962,6 +3969,23 @@ type FlushOption struct {
 	Channel  string
 	Tables   []TableName
 	ReadLock bool
+}
+
+// PurgeBinaryLogs represents a PURGE BINARY LOGS statement.
+type PurgeBinaryLogs struct {
+	To string
+	Before Expr
+}
+
+func (node *PurgeBinaryLogs) Format(buf *TrackedBuffer) {
+	buf.WriteString("purge binary logs")
+
+	if node.To != "" {
+		buf.Myprintf(" to %s", node.To)
+	} else if node.Before != nil {
+		buf.Myprintf(" before ")
+		node.Before.Format(buf)
+	}
 }
 
 // Flush represents a Flush statement.

@@ -32,7 +32,7 @@ func checkDistribution(t *testing.T, data []*net.SRV, margin float64) {
 	results := make(map[string]int)
 
 	count := 1000
-	for j := 0; j < count; j++ {
+	for range count {
 		d := make([]*net.SRV, len(data))
 		copy(d, data)
 		byPriorityWeight(d).shuffleByWeight()
@@ -55,7 +55,7 @@ func checkDistribution(t *testing.T, data []*net.SRV, margin float64) {
 func testUniformity(t *testing.T, size int, margin float64) {
 	rand.Seed(1)
 	data := make([]*net.SRV, size)
-	for i := 0; i < size; i++ {
+	for i := range size {
 		data[i] = &net.SRV{Target: fmt.Sprintf("%c", 'a'+i), Weight: 1}
 	}
 	checkDistribution(t, data, margin)

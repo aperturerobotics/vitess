@@ -339,8 +339,8 @@ func ToFloat64(v Value) (float64, error) {
 
 // ToNative converts Value to a native go type.
 // Decimal is returned as []byte.
-func ToNative(v Value) (interface{}, error) {
-	var out interface{}
+func ToNative(v Value) (any, error) {
+	var out any
 	var err error
 	switch {
 	case v.Type() == Null:

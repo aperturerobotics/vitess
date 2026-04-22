@@ -31,7 +31,7 @@ func newSizedPool(size int) *sizedPool {
 	return &sizedPool{
 		size: size,
 		pool: sync.Pool{
-			New: func() interface{} { return makeSlicePointer(size) },
+			New: func() any { return makeSlicePointer(size) },
 		},
 	}
 }

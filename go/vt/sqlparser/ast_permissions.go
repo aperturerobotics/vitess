@@ -28,7 +28,7 @@ type AccountName struct {
 }
 
 // String returns the AccountName as a formatted string.
-func (an *AccountName) String() string {
+func (an AccountName) String() string {
 	host := an.Host
 	if an.AnyHost {
 		host = "%"
@@ -55,10 +55,10 @@ func (ar *AccountRename) String() string {
 
 // Authentication represents an account's authentication.
 type Authentication struct {
-	RandomPassword bool
 	Password       string
 	Identity       string
 	Plugin         string
+	RandomPassword bool
 }
 
 // String returns this Authentication as a formatted string.
@@ -82,11 +82,11 @@ func (auth *Authentication) String() string {
 
 // AccountWithAuth represents a new account with all of its authentication information.
 type AccountWithAuth struct {
-	AccountName
 	Auth1       *Authentication
 	Auth2       *Authentication
 	Auth3       *Authentication
 	AuthInitial *Authentication
+	AccountName
 }
 
 // String returns AccountWithAuth as a formatted string.
@@ -124,17 +124,17 @@ const (
 
 // TLSOptionItem represents one of the available TLS options.
 type TLSOptionItem struct {
-	TLSOptionItemType
 	ItemData string
+	TLSOptionItemType
 }
 
 // TLSOptions represents a new user's TLS options.
 type TLSOptions struct {
-	SSL     bool
-	X509    bool
 	Cipher  string
 	Issuer  string
 	Subject string
+	SSL     bool
+	X509    bool
 }
 
 // NewTLSOptions returns a new TLSOptions from the given items.
@@ -210,8 +210,8 @@ const (
 
 // AccountLimitItem represents one of the available account limitations.
 type AccountLimitItem struct {
-	AccountLimitItemType
 	Count *SQLVal
+	AccountLimitItemType
 }
 
 // AccountLimits represents a new user's maximum limits.
@@ -281,19 +281,18 @@ const (
 
 // PassLockItem represents one of the available password or account options.
 type PassLockItem struct {
-	PassLockItemType
 	Value *SQLVal
+	PassLockItemType
 }
 
 // PasswordOptions represents which options may be given to new user account on how to handle passwords.
 type PasswordOptions struct {
+	ExpirationTime         *SQLVal
+	History                *SQLVal
+	ReuseInterval          *SQLVal
+	FailedAttempts         *SQLVal
+	LockTime               *SQLVal
 	RequireCurrentOptional bool
-
-	ExpirationTime *SQLVal // nil represents the default
-	History        *SQLVal // nil represents the default
-	ReuseInterval  *SQLVal // nil represents the default
-	FailedAttempts *SQLVal // will always be set
-	LockTime       *SQLVal // nil represents an unbounded lock time
 }
 
 // NewPasswordOptionsWithLock returns a new PasswordOptions, along with whether to lock the account, from the given items.
@@ -453,9 +452,9 @@ func (p *PrivilegeLevel) String() string {
 
 // Privilege specifies a privilege to be used in a GRANT or REVOKE statement.
 type Privilege struct {
-	Type        PrivilegeType
 	DynamicName string
 	Columns     []string
+	Type        PrivilegeType
 }
 
 // String returns the Privilege as a formatted string.
@@ -546,9 +545,9 @@ func (p *Privilege) String() string {
 
 // GrantUserAssumption represents the target user that the user executing the GRANT statement will assume the identity of.
 type GrantUserAssumption struct {
-	Type  GrantUserAssumptionType
 	User  AccountName
 	Roles []AccountName
+	Type  GrantUserAssumptionType
 }
 
 // String returns this GrantUserAssumption as a formatted string.
@@ -587,17 +586,19 @@ func (gau *GrantUserAssumption) String() string {
 
 // CreateUser represents the CREATE USER statement.
 type CreateUser struct {
-	IfNotExists     bool
-	Users           []AccountWithAuth
-	DefaultRoles    []AccountName
+	Auth            AuthInformation
 	TLSOptions      *TLSOptions
 	AccountLimits   *AccountLimits
 	PasswordOptions *PasswordOptions
-	Locked          bool
 	Attribute       string
+	Users           []AccountWithAuth
+	DefaultRoles    []AccountName
+	IfNotExists     bool
+	Locked          bool
 }
 
 var _ Statement = (*CreateUser)(nil)
+var _ AuthNode = (*CreateUser)(nil)
 
 // iStatement implements the interface Statement.
 func (c *CreateUser) iStatement() {}
@@ -643,12 +644,39 @@ func (c *CreateUser) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (c *CreateUser) GetAuthInformation() AuthInformation {
+	return c.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (c *CreateUser) SetAuthType(authType string) {
+	c.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (c *CreateUser) SetAuthTargetType(targetType string) {
+	c.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (c *CreateUser) SetAuthTargetNames(targetNames []string) {
+	c.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (c *CreateUser) SetExtra(extra any) {
+	c.Auth.Extra = extra
+}
+
 // RenameUser represents the RENAME USER statement.
 type RenameUser struct {
+	Auth     AuthInformation
 	Accounts []AccountRename
 }
 
 var _ Statement = (*RenameUser)(nil)
+var _ AuthNode = (*RenameUser)(nil)
 
 // iStatement implements the interface Statement.
 func (r *RenameUser) iStatement() {}
@@ -664,13 +692,40 @@ func (r *RenameUser) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (r *RenameUser) GetAuthInformation() AuthInformation {
+	return r.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (r *RenameUser) SetAuthType(authType string) {
+	r.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (r *RenameUser) SetAuthTargetType(targetType string) {
+	r.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (r *RenameUser) SetAuthTargetNames(targetNames []string) {
+	r.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (r *RenameUser) SetExtra(extra any) {
+	r.Auth.Extra = extra
+}
+
 // DropUser represents the DROP USER statement.
 type DropUser struct {
-	IfExists     bool
+	Auth         AuthInformation
 	AccountNames []AccountName
+	IfExists     bool
 }
 
 var _ Statement = (*DropUser)(nil)
+var _ AuthNode = (*DropUser)(nil)
 
 // iStatement implements the interface Statement.
 func (d *DropUser) iStatement() {}
@@ -690,13 +745,40 @@ func (d *DropUser) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (d *DropUser) GetAuthInformation() AuthInformation {
+	return d.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (d *DropUser) SetAuthType(authType string) {
+	d.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (d *DropUser) SetAuthTargetType(targetType string) {
+	d.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (d *DropUser) SetAuthTargetNames(targetNames []string) {
+	d.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (d *DropUser) SetExtra(extra any) {
+	d.Auth.Extra = extra
+}
+
 // CreateRole represents the CREATE ROLE statement.
 type CreateRole struct {
-	IfNotExists bool
+	Auth        AuthInformation
 	Roles       []AccountName
+	IfNotExists bool
 }
 
 var _ Statement = (*CreateRole)(nil)
+var _ AuthNode = (*CreateRole)(nil)
 
 // iStatement implements the interface Statement.
 func (c *CreateRole) iStatement() {}
@@ -716,13 +798,40 @@ func (c *CreateRole) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (c *CreateRole) GetAuthInformation() AuthInformation {
+	return c.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (c *CreateRole) SetAuthType(authType string) {
+	c.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (c *CreateRole) SetAuthTargetType(targetType string) {
+	c.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (c *CreateRole) SetAuthTargetNames(targetNames []string) {
+	c.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (c *CreateRole) SetExtra(extra any) {
+	c.Auth.Extra = extra
+}
+
 // DropRole represents the DROP ROLE statement.
 type DropRole struct {
-	IfExists bool
+	Auth     AuthInformation
 	Roles    []AccountName
+	IfExists bool
 }
 
 var _ Statement = (*DropRole)(nil)
+var _ AuthNode = (*DropRole)(nil)
 
 // iStatement implements the interface Statement.
 func (d *DropRole) iStatement() {}
@@ -742,17 +851,44 @@ func (d *DropRole) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (d *DropRole) GetAuthInformation() AuthInformation {
+	return d.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (d *DropRole) SetAuthType(authType string) {
+	d.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (d *DropRole) SetAuthTargetType(targetType string) {
+	d.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (d *DropRole) SetAuthTargetNames(targetNames []string) {
+	d.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (d *DropRole) SetExtra(extra any) {
+	d.Auth.Extra = extra
+}
+
 // GrantPrivilege represents the GRANT...ON...TO statement.
 type GrantPrivilege struct {
-	Privileges      []Privilege
-	ObjectType      GrantObjectType
-	PrivilegeLevel  PrivilegeLevel
-	To              []AccountName
-	WithGrantOption bool
+	Auth            AuthInformation
 	As              *GrantUserAssumption
+	PrivilegeLevel  PrivilegeLevel
+	Privileges      []Privilege
+	To              []AccountName
+	ObjectType      GrantObjectType
+	WithGrantOption bool
 }
 
 var _ Statement = (*GrantPrivilege)(nil)
+var _ AuthNode = (*GrantPrivilege)(nil)
 
 // iStatement implements the interface Statement.
 func (g *GrantPrivilege) iStatement() {}
@@ -792,14 +928,41 @@ func (g *GrantPrivilege) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (g *GrantPrivilege) GetAuthInformation() AuthInformation {
+	return g.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (g *GrantPrivilege) SetAuthType(authType string) {
+	g.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (g *GrantPrivilege) SetAuthTargetType(targetType string) {
+	g.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (g *GrantPrivilege) SetAuthTargetNames(targetNames []string) {
+	g.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (g *GrantPrivilege) SetExtra(extra any) {
+	g.Auth.Extra = extra
+}
+
 // GrantRole represents the GRANT...TO statement.
 type GrantRole struct {
+	Auth            AuthInformation
 	Roles           []AccountName
 	To              []AccountName
 	WithAdminOption bool
 }
 
 var _ Statement = (*GrantRole)(nil)
+var _ AuthNode = (*GrantRole)(nil)
 
 // iStatement implements the interface Statement.
 func (g *GrantRole) iStatement() {}
@@ -825,14 +988,41 @@ func (g *GrantRole) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (g *GrantRole) GetAuthInformation() AuthInformation {
+	return g.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (g *GrantRole) SetAuthType(authType string) {
+	g.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (g *GrantRole) SetAuthTargetType(targetType string) {
+	g.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (g *GrantRole) SetAuthTargetNames(targetNames []string) {
+	g.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (g *GrantRole) SetExtra(extra any) {
+	g.Auth.Extra = extra
+}
+
 // GrantProxy represents the GRANT PROXY statement.
 type GrantProxy struct {
+	Auth            AuthInformation
 	On              AccountName
 	To              []AccountName
 	WithGrantOption bool
 }
 
 var _ Statement = (*GrantProxy)(nil)
+var _ AuthNode = (*GrantProxy)(nil)
 
 // iStatement implements the interface Statement.
 func (g *GrantProxy) iStatement() {}
@@ -851,15 +1041,44 @@ func (g *GrantProxy) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (g *GrantProxy) GetAuthInformation() AuthInformation {
+	return g.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (g *GrantProxy) SetAuthType(authType string) {
+	g.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (g *GrantProxy) SetAuthTargetType(targetType string) {
+	g.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (g *GrantProxy) SetAuthTargetNames(targetNames []string) {
+	g.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (g *GrantProxy) SetExtra(extra any) {
+	g.Auth.Extra = extra
+}
+
 // RevokePrivilege represents the REVOKE...ON...FROM statement.
 type RevokePrivilege struct {
-	Privileges     []Privilege
-	ObjectType     GrantObjectType
-	PrivilegeLevel PrivilegeLevel
-	From           []AccountName
+	Auth              AuthInformation
+	PrivilegeLevel    PrivilegeLevel
+	Privileges        []Privilege
+	From              []AccountName
+	ObjectType        GrantObjectType
+	IfExists          bool
+	IgnoreUnknownUser bool
 }
 
 var _ Statement = (*RevokePrivilege)(nil)
+var _ AuthNode = (*RevokePrivilege)(nil)
 
 // iStatement implements the interface Statement.
 func (r *RevokePrivilege) iStatement() {}
@@ -867,6 +1086,9 @@ func (r *RevokePrivilege) iStatement() {}
 // Format implements the interface Statement.
 func (r *RevokePrivilege) Format(buf *TrackedBuffer) {
 	buf.Myprintf("revoke")
+	if r.IfExists {
+		buf.Myprintf(" if exists")
+	}
 	for i, privilege := range r.Privileges {
 		if i > 0 {
 			buf.Myprintf(",")
@@ -891,36 +1113,47 @@ func (r *RevokePrivilege) Format(buf *TrackedBuffer) {
 		}
 		buf.Myprintf(" %s", user.String())
 	}
-}
-
-// RevokeAllPrivileges represents the REVOKE ALL statement.
-type RevokeAllPrivileges struct {
-	From []AccountName
-}
-
-var _ Statement = (*RevokeAllPrivileges)(nil)
-
-// iStatement implements the interface Statement.
-func (r *RevokeAllPrivileges) iStatement() {}
-
-// Format implements the interface Statement.
-func (r *RevokeAllPrivileges) Format(buf *TrackedBuffer) {
-	buf.Myprintf("revoke all privileges, grant option from")
-	for i, user := range r.From {
-		if i > 0 {
-			buf.Myprintf(",")
-		}
-		buf.Myprintf(" %s", user.String())
+	if r.IgnoreUnknownUser {
+		buf.Myprintf(" ignore unknown user")
 	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (r *RevokePrivilege) GetAuthInformation() AuthInformation {
+	return r.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (r *RevokePrivilege) SetAuthType(authType string) {
+	r.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (r *RevokePrivilege) SetAuthTargetType(targetType string) {
+	r.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (r *RevokePrivilege) SetAuthTargetNames(targetNames []string) {
+	r.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (r *RevokePrivilege) SetExtra(extra any) {
+	r.Auth.Extra = extra
 }
 
 // RevokeRole represents the REVOKE...FROM statement.
 type RevokeRole struct {
-	Roles []AccountName
-	From  []AccountName
+	Auth              AuthInformation
+	Roles             []AccountName
+	From              []AccountName
+	IfExists          bool
+	IgnoreUnknownUser bool
 }
 
 var _ Statement = (*RevokeRole)(nil)
+var _ AuthNode = (*RevokeRole)(nil)
 
 // iStatement implements the interface Statement.
 func (r *RevokeRole) iStatement() {}
@@ -928,6 +1161,9 @@ func (r *RevokeRole) iStatement() {}
 // Format implements the interface Statement.
 func (r *RevokeRole) Format(buf *TrackedBuffer) {
 	buf.Myprintf("revoke")
+	if r.IfExists {
+		buf.Myprintf(" if exists")
+	}
 	for i, role := range r.Roles {
 		if i > 0 {
 			buf.Myprintf(",")
@@ -941,38 +1177,104 @@ func (r *RevokeRole) Format(buf *TrackedBuffer) {
 		}
 		buf.Myprintf(" %s", user.String())
 	}
+	if r.IgnoreUnknownUser {
+		buf.Myprintf(" ignore unknown user")
+	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (r *RevokeRole) GetAuthInformation() AuthInformation {
+	return r.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (r *RevokeRole) SetAuthType(authType string) {
+	r.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (r *RevokeRole) SetAuthTargetType(targetType string) {
+	r.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (r *RevokeRole) SetAuthTargetNames(targetNames []string) {
+	r.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (r *RevokeRole) SetExtra(extra any) {
+	r.Auth.Extra = extra
 }
 
 // RevokeProxy represents the REVOKE PROXY statement.
 type RevokeProxy struct {
-	On   AccountName
-	From []AccountName
+	Auth              AuthInformation
+	On                AccountName
+	From              []AccountName
+	IfExists          bool
+	IgnoreUnknownUser bool
 }
 
 var _ Statement = (*RevokeProxy)(nil)
+var _ AuthNode = (*RevokeProxy)(nil)
 
 // iStatement implements the interface Statement.
 func (r *RevokeProxy) iStatement() {}
 
 // Format implements the interface Statement.
 func (r *RevokeProxy) Format(buf *TrackedBuffer) {
-	buf.Myprintf("revoke proxy on %s from", r.On.String())
+	buf.Myprintf("revoke")
+	if r.IfExists {
+		buf.Myprintf(" if exists")
+	}
+	buf.Myprintf(" proxy on %s from", r.On.String())
 	for i, user := range r.From {
 		if i > 0 {
 			buf.Myprintf(",")
 		}
 		buf.Myprintf(" %s", user.String())
 	}
+	if r.IgnoreUnknownUser {
+		buf.Myprintf(" ignore unknown user")
+	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (r *RevokeProxy) GetAuthInformation() AuthInformation {
+	return r.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (r *RevokeProxy) SetAuthType(authType string) {
+	r.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (r *RevokeProxy) SetAuthTargetType(targetType string) {
+	r.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (r *RevokeProxy) SetAuthTargetNames(targetNames []string) {
+	r.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (r *RevokeProxy) SetExtra(extra any) {
+	r.Auth.Extra = extra
 }
 
 // ShowGrants represents the SHOW GRANTS statement.
 type ShowGrants struct {
-	CurrentUser bool
+	Auth        AuthInformation
 	For         *AccountName
 	Using       []AccountName
+	CurrentUser bool
 }
 
 var _ Statement = (*ShowGrants)(nil)
+var _ AuthNode = (*ShowGrants)(nil)
 
 // iStatement implements the interface Statement.
 func (s *ShowGrants) iStatement() {}
@@ -998,10 +1300,38 @@ func (s *ShowGrants) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (s *ShowGrants) GetAuthInformation() AuthInformation {
+	return s.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (s *ShowGrants) SetAuthType(authType string) {
+	s.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (s *ShowGrants) SetAuthTargetType(targetType string) {
+	s.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (s *ShowGrants) SetAuthTargetNames(targetNames []string) {
+	s.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (s *ShowGrants) SetExtra(extra any) {
+	s.Auth.Extra = extra
+}
+
 // ShowPrivileges represents the SHOW PRIVILEGES statement.
-type ShowPrivileges struct{}
+type ShowPrivileges struct {
+	Auth AuthInformation
+}
 
 var _ Statement = (*ShowPrivileges)(nil)
+var _ AuthNode = (*ShowPrivileges)(nil)
 
 // iStatement implements the interface Statement.
 func (s *ShowPrivileges) iStatement() {}
@@ -1009,6 +1339,31 @@ func (s *ShowPrivileges) iStatement() {}
 // Format implements the interface Statement.
 func (s *ShowPrivileges) Format(buf *TrackedBuffer) {
 	buf.Myprintf("show privileges")
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (s *ShowPrivileges) GetAuthInformation() AuthInformation {
+	return s.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (s *ShowPrivileges) SetAuthType(authType string) {
+	s.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (s *ShowPrivileges) SetAuthTargetType(targetType string) {
+	s.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (s *ShowPrivileges) SetAuthTargetNames(targetNames []string) {
+	s.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (s *ShowPrivileges) SetExtra(extra any) {
+	s.Auth.Extra = extra
 }
 
 // atoi is a shortcut for converting integer SQLVals to integers.

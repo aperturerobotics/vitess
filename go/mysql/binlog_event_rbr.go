@@ -37,19 +37,20 @@ var ZeroTimestamp = []byte("0000-00-00 00:00:00")
 // TableMap implements BinlogEvent.TableMap().
 //
 // Expected format (L = total length of event data):
-//  # bytes   field
-//  4/6       table id
-//  2         flags
-//  1         schema name length sl
-//  sl        schema name
-//  1         [00]
-//  1         table name length tl
-//  tl        table name
-//  1         [00]
-//  <var>     column count cc (var-len encoded)
-//  cc        column-def, one byte per column
-//  <var>     column-meta-def (var-len encoded string)
-//  n         NULL-bitmask, length: (cc + 7) / 8
+//
+//	# bytes   field
+//	4/6       table id
+//	2         flags
+//	1         schema name length sl
+//	sl        schema name
+//	1         [00]
+//	1         table name length tl
+//	tl        table name
+//	1         [00]
+//	<var>     column count cc (var-len encoded)
+//	cc        column-def, one byte per column
+//	<var>     column-meta-def (var-len encoded string)
+//	n         NULL-bitmask, length: (cc + 7) / 8
 func (ev binlogEvent) TableMap(f BinlogFormat) (*TableMap, error) {
 	data := ev.Bytes()[f.HeaderLength:]
 
@@ -83,7 +84,7 @@ func (ev binlogEvent) TableMap(f BinlogFormat) (*TableMap, error) {
 	// Allocate and parse / copy Metadata.
 	result.Metadata = make([]uint16, columnCount)
 	expectedEnd := pos + l
-	for c := 0; c < columnCount; c++ {
+	for c := range columnCount {
 		var err error
 		result.Metadata[c], pos, err = metadataRead(data, pos, result.Types[c])
 		if err != nil {
@@ -412,7 +413,7 @@ func CellValue(data []byte, pos int, typ byte, metadata uint16, styp querypb.Typ
 		month := val >> 5 & 15
 		year := val >> 9
 		return sqltypes.MakeTrusted(querypb.Type_DATE,
-			[]byte(fmt.Sprintf("%04d-%02d-%02d", year, month, day))), 3, nil
+			fmt.Appendf(nil, "%04d-%02d-%02d", year, month, day)), 3, nil
 	case TypeTime:
 		var hour, minute, second int32
 		if data[pos+2]&128 > 0 {
@@ -433,7 +434,7 @@ func CellValue(data []byte, pos int, typ byte, metadata uint16, styp querypb.Typ
 			second = val % 100
 		}
 		return sqltypes.MakeTrusted(querypb.Type_TIME,
-			[]byte(fmt.Sprintf("%02d:%02d:%02d", hour, minute, second))), 3, nil
+			fmt.Appendf(nil, "%02d:%02d:%02d", hour, minute, second)), 3, nil
 	case TypeDateTime:
 		val := binary.LittleEndian.Uint64(data[pos : pos+8])
 		d := val / 1000000
@@ -445,7 +446,7 @@ func CellValue(data []byte, pos int, typ byte, metadata uint16, styp querypb.Typ
 		minute := (t % 10000) / 100
 		second := t % 100
 		return sqltypes.MakeTrusted(querypb.Type_DATETIME,
-			[]byte(fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second))), 8, nil
+			fmt.Appendf(nil, "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second)), 8, nil
 	case TypeVarchar, TypeVarString:
 		// Length is encoded in 1 or 2 bytes.
 		if metadata > 255 {
@@ -633,7 +634,7 @@ func CellValue(data []byte, pos int, typ byte, metadata uint16, styp querypb.Typ
 		minute := (hms >> 6) % (1 << 6)
 		second := hms % (1 << 6)
 		return sqltypes.MakeTrusted(querypb.Type_TIME,
-			[]byte(fmt.Sprintf("%v%02d:%02d:%02d%v", sign, hour, minute, second, fracStr))), 3 + (int(metadata)+1)/2, nil
+			fmt.Appendf(nil, "%v%02d:%02d:%02d%v", sign, hour, minute, second, fracStr)), 3 + (int(metadata)+1)/2, nil
 
 	case TypeNewDecimal:
 		precision := int(metadata >> 8) // total digits number
@@ -693,7 +694,7 @@ func CellValue(data []byte, pos int, typ byte, metadata uint16, styp querypb.Typ
 		}
 
 		// now the full digits, 32 bits each, 9 digits
-		for i := 0; i < intg0; i++ {
+		for range intg0 {
 			val = binary.BigEndian.Uint32(d[pos : pos+4])
 			fmt.Fprintf(txt, "%9d", val)
 			pos += 4
@@ -707,7 +708,7 @@ func CellValue(data []byte, pos int, typ byte, metadata uint16, styp querypb.Typ
 		txt.WriteByte('.')
 
 		// now the full fractional digits
-		for i := 0; i < frac0; i++ {
+		for range frac0 {
 			val = binary.BigEndian.Uint32(d[pos : pos+4])
 			fmt.Fprintf(txt, "%09d", val)
 			pos += 4
@@ -845,7 +846,7 @@ func CellValue(data []byte, pos int, typ byte, metadata uint16, styp querypb.Typ
 			// numbers.
 			l := int(metadata & 0xff)
 			var val uint64
-			for i := 0; i < l; i++ {
+			for i := range l {
 				val += uint64(data[pos+i]) << (uint(i) * 8)
 			}
 			return sqltypes.MakeTrusted(querypb.Type_UINT64,
@@ -908,13 +909,15 @@ func CellValue(data []byte, pos int, typ byte, metadata uint16, styp querypb.Typ
 // Rows implements BinlogEvent.TableMap().
 //
 // Expected format (L = total length of event data):
-//  # bytes   field
-//  4/6       table id
-//  2         flags
-//  -- if version == 2
-//  2         extra data length edl
-//  edl       extra data
-//  -- endif
+//
+//	# bytes   field
+//	4/6       table id
+//	2         flags
+//	-- if version == 2
+//	2         extra data length edl
+//	edl       extra data
+//	-- endif
+//
 // <var>      number of columns (var-len encoded)
 // <var>      identify bitmap
 // <var>      data bitmap
@@ -977,7 +980,7 @@ func (ev binlogEvent) Rows(f BinlogFormat, tm *TableMap) (Rows, error) {
 			// Get the identify values.
 			startPos := pos
 			valueIndex := 0
-			for c := 0; c < columnCount; c++ {
+			for c := range columnCount {
 				if !result.IdentifyColumns.Bit(c) {
 					// This column is not represented.
 					continue
@@ -1007,7 +1010,7 @@ func (ev binlogEvent) Rows(f BinlogFormat, tm *TableMap) (Rows, error) {
 			// Get the values.
 			startPos := pos
 			valueIndex := 0
-			for c := 0; c < columnCount; c++ {
+			for c := range columnCount {
 				if !result.DataColumns.Bit(c) {
 					// This column is not represented.
 					continue

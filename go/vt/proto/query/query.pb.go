@@ -276,6 +276,9 @@ const (
 	// This type is for internal use only.
 	// Properties: 31, None.
 	Type_EXPRESSION Type = 31
+	// VECTOR specifies a VECTOR type.
+	// Properties: 32, IsBinary.
+	Type_VECTOR Type = 8224
 )
 
 // Enum value maps for Type.
@@ -313,6 +316,7 @@ var (
 		2077:  "GEOMETRY",
 		2078:  "JSON",
 		31:    "EXPRESSION",
+		8224:  "VECTOR",
 	}
 	Type_value = map[string]int32{
 		"NULL_TYPE":  0,
@@ -347,6 +351,7 @@ var (
 		"GEOMETRY":   2077,
 		"JSON":       2078,
 		"EXPRESSION": 31,
+		"VECTOR":     8224,
 	}
 )
 
@@ -15900,9 +15905,7 @@ func (x *Value) MarshalProtoText() string {
 	}
 	if len(x.Value) > 0 {
 		sb.WriteString(" value: ")
-		sb.WriteString("\"")
-		sb.WriteString(base64.StdEncoding.EncodeToString(x.Value))
-		sb.WriteString("\"")
+		sb.WriteString(strconv.Quote(string(x.Value)))
 	}
 	sb.WriteString("}")
 	return sb.String()
@@ -15919,9 +15922,7 @@ func (x *BindVariable) MarshalProtoText() string {
 	}
 	if len(x.Value) > 0 {
 		sb.WriteString(" value: ")
-		sb.WriteString("\"")
-		sb.WriteString(base64.StdEncoding.EncodeToString(x.Value))
-		sb.WriteString("\"")
+		sb.WriteString(strconv.Quote(string(x.Value)))
 	}
 	if len(x.Values) > 0 {
 		sb.WriteString(" values: [")

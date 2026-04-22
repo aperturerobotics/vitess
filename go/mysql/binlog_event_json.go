@@ -129,7 +129,7 @@ func printJSONObject(data []byte, large bool, result *bytes.Buffer) error {
 
 	// Build an array for each key.
 	keys := make([]sqltypes.Value, elementCount)
-	for i := 0; i < elementCount; i++ {
+	for i := range elementCount {
 		var keyOffset, keyLength int
 		keyOffset, pos = readOffsetOrSize(data, pos, large)
 		keyLength, pos = readOffsetOrSize(data, pos, false) // always 16
@@ -142,7 +142,7 @@ func printJSONObject(data []byte, large bool, result *bytes.Buffer) error {
 	// then it is inlined. This is always the case for Literal (one byte),
 	// and {,u}int16. For {u}int32, it depends if we're large or not.
 	result.WriteString("JSON_OBJECT(")
-	for i := 0; i < elementCount; i++ {
+	for i := range elementCount {
 		// First print the key value.
 		if i > 0 {
 			result.WriteByte(',')
@@ -177,7 +177,7 @@ func printJSONArray(data []byte, large bool, result *bytes.Buffer) error {
 	// then it is inlined. This is always the case for Literal (one byte),
 	// and {,u}int16. For {u}int32, it depends if we're large or not.
 	result.WriteString("JSON_ARRAY(")
-	for i := 0; i < elementCount; i++ {
+	for i := range elementCount {
 		// Print the key value.
 		if i > 0 {
 			result.WriteByte(',')

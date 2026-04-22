@@ -168,7 +168,7 @@ func TestPoolWeirdMaxSize(t *testing.T) {
 
 func TestFuzz(t *testing.T) {
 	maxTestSize := 16384
-	for i := 0; i < 20000; i++ {
+	for range 20000 {
 
 		minSize := 1024
 		maxSize := rand.Intn(maxTestSize-minSize) + minSize
@@ -227,9 +227,9 @@ func BenchmarkPoolGet(b *testing.B) {
 }
 
 func randIntSlice(max int) (r []int) {
-	 r = make([]int, 1024*1024)
-	 for i := range r {
-		 r[i] = rand.Intn(max)
-	 }
-	 return
+	r = make([]int, 1024*1024)
+	for i := range r {
+		r[i] = rand.Intn(max)
+	}
+	return
 }

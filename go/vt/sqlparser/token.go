@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -38,54 +39,55 @@ const (
 )
 
 type tokenAndValue struct {
-	token int
 	value []byte
+	token int
 }
 
 // Tokenizer is the struct used to generate SQL
 // tokens for the parser.
 type Tokenizer struct {
-	InStream             io.Reader
-	AllowComments        bool
-	SkipSpecialComments  bool
-	lastChar             uint16
+	ParseTree Statement
+	LastError error
+	InStream  io.Reader
+	// stringLiteralQuotes holds the characters that are treated as string literal quotes. This always includes the
+	// single quote char. When ANSI_QUOTES SQL mode is NOT enabled, this also contains the double quote character.
+	stringLiteralQuotes map[uint16]struct{}
+	// identifierQuotes holds the characters that are treated as identifier quotes. This always includes
+	// the backtick char. When the ANSI_QUOTES SQL mode is enabled, it also includes the double quote char.
+	identifierQuotes     map[uint16]struct{}
+	specialComment       *Tokenizer
+	digestedTokens       []tokenAndValue
+	queryBuf             []byte
+	buf                  []byte
+	lastToken            []byte
+	lastNonNilToken      []byte
+	nesting              int
+	bufPos               int
+	bufSize              int
+	specialCommentEndPos int
+	posVarIndex          int
 	Position             int
 	OldPosition          int
-	lastToken            []byte
 	lastTyp              int
-	lastNonNilToken      []byte
-	LastError            error
-	posVarIndex          int
-	ParseTree            Statement
-	nesting              int
-	multi                bool
-	specialComment       *Tokenizer
-	specialCommentEndPos int
-	potentialAccountName bool
-	digestedTokens       []tokenAndValue
-
+	lastChar             uint16
+	stopped              bool
 	// If true, the parser should collaborate to set `stopped` on this
 	// tokenizer after a statement is parsed. From that point forward, the
 	// tokenizer will return EOF, instead of new tokens. `ParseOne` uses
 	// this to parse the first delimited statement and then return the
 	// trailer.
-	stopAfterFirstStmt bool
-	stopped            bool
-
-	buf     []byte
-	bufPos  int
-	bufSize int
-
-	// identifierQuotes holds the characters that are treated as identifier quotes. This always includes
-	// the backtick char. When the ANSI_QUOTES SQL mode is enabled, it also includes the double quote char.
-	identifierQuotes map[uint16]struct{}
-
-	// stringLiteralQuotes holds the characters that are treated as string literal quotes. This always includes the
-	// single quote char. When ANSI_QUOTES SQL mode is NOT enabled, this also contains the double quote character.
-	stringLiteralQuotes map[uint16]struct{}
-
-	queryBuf []byte
+	stopAfterFirstStmt   bool
+	potentialAccountName bool
+	multi                bool
+	SkipSpecialComments  bool
+	AllowComments        bool
+	PipesAsConcat        bool
 }
+
+var defaultIdQuotes = map[uint16]struct{}{backtickQuote: {}}
+var defaultStrLitQuotes = map[uint16]struct{}{doubleQuote: {}, singleQuote: {}}
+var ansiIdQuotes = map[uint16]struct{}{backtickQuote: {}, doubleQuote: {}}
+var ansiStrLitQuotes = map[uint16]struct{}{singleQuote: {}}
 
 // NewStringTokenizer creates a new Tokenizer for the
 // sql string.
@@ -94,8 +96,8 @@ func NewStringTokenizer(sql string) *Tokenizer {
 	return &Tokenizer{
 		buf:                 buf,
 		bufSize:             len(buf),
-		identifierQuotes:    map[uint16]struct{}{backtickQuote: {}},
-		stringLiteralQuotes: map[uint16]struct{}{doubleQuote: {}, singleQuote: {}},
+		identifierQuotes:    defaultIdQuotes,
+		stringLiteralQuotes: defaultStrLitQuotes,
 	}
 }
 
@@ -176,7 +178,7 @@ func (tkn *Tokenizer) Error(err string) {
 
 // digestToken stores a token and its value for later retrieval when necessary for additional look-ahead
 func (tkn *Tokenizer) digestToken(token int, value []byte) {
-	tkn.digestedTokens = append(tkn.digestedTokens, tokenAndValue{token, value})
+	tkn.digestedTokens = append(tkn.digestedTokens, tokenAndValue{token: token, value: value})
 }
 
 // digestedToken returns the first digested token and removes it from the list of digested tokens
@@ -186,7 +188,7 @@ func (tkn *Tokenizer) digestedToken() (token int, value []byte) {
 	}
 	length := len(tkn.digestedTokens)
 	tokenAndValue := tkn.digestedTokens[length-1]
-	tkn.digestedTokens = tkn.digestedTokens[0:length-1]
+	tkn.digestedTokens = tkn.digestedTokens[0 : length-1]
 
 	if len(tkn.digestedTokens) == 0 {
 		tkn.digestedTokens = nil
@@ -269,10 +271,8 @@ func (tkn *Tokenizer) Scan() (int, []byte) {
 		}
 		// LEX_ERROR is returned from scanNumber iff we see an unexpected character, so try to parse as an identifier
 		// Additionally, if we saw a decimal at any point, throw the LEX_ERROR we received before
-		for _, c := range res {
-			if c == '.' {
-				return typ, res
-			}
+		if slices.Contains(res, '.') {
+			return typ, res
 		}
 		typ1, res1 := tkn.scanIdentifier(byte(tkn.lastChar), false)
 		return typ1, append(res, res1[1:]...) // Concatenate the two partial symbols
@@ -303,6 +303,9 @@ func (tkn *Tokenizer) Scan() (int, []byte) {
 		case '|':
 			if tkn.lastChar == '|' {
 				tkn.next()
+				if tkn.PipesAsConcat {
+					return CONCAT, nil
+				}
 				return OR, nil
 			}
 			return int(ch), nil
@@ -312,7 +315,9 @@ func (tkn *Tokenizer) Scan() (int, []byte) {
 			fmt.Fprintf(buf, ":v%d", tkn.posVarIndex)
 			return VALUE_ARG, buf.Bytes()
 		case '.':
-			if isDigit(tkn.lastChar) {
+			// A dot following an identifier begins a qualified name, so the digit
+			// after it is the start of a column name, not a decimal literal.
+			if isDigit(tkn.lastChar) && tkn.lastTyp != ID {
 				return tkn.scanNumber(true)
 			}
 			return int(ch), nil
@@ -322,9 +327,18 @@ func (tkn *Tokenizer) Scan() (int, []byte) {
 				tkn.next()
 				return tkn.scanCommentType1("//")
 			case '*':
+				if tkn.SkipSpecialComments {
+					return tkn.scanCommentType2()
+				}
 				tkn.next()
-				if tkn.lastChar == '!' && !tkn.SkipSpecialComments {
+				switch tkn.lastChar {
+				case '!':
 					return tkn.scanMySQLSpecificComment()
+				case 'M':
+					tkn.next()
+					if tkn.lastChar == '!' {
+						return tkn.scanMariaDBSpecificComment()
+					}
 				}
 				return tkn.scanCommentType2()
 			default:
@@ -750,14 +764,12 @@ func (tkn *Tokenizer) scanCommentType2() (int, []byte) {
 	return COMMENT, buffer.Bytes()
 }
 
-func (tkn *Tokenizer) scanMySQLSpecificComment() (int, []byte) {
+// scanExecutableComment scans executable comments with version-gated SQL content.
+// Handles MySQL (/*!) with 5-digit versions and MariaDB (/*M!) with 5 or 6-digit versions.
+func (tkn *Tokenizer) scanExecutableComment(prefix string) (int, []byte) {
 	buffer := &bytes2.Buffer{}
-	buffer.WriteString("/*!")
+	buffer.WriteString(prefix)
 	tkn.next()
-
-	foundStartPos := false
-	startOffset := 0
-	digitCount := 0
 
 	for {
 		if tkn.lastChar == '*' {
@@ -772,42 +784,72 @@ func (tkn *Tokenizer) scanMySQLSpecificComment() (int, []byte) {
 		if tkn.lastChar == eofChar {
 			return LEX_ERROR, buffer.Bytes()
 		}
+
 		tkn.consumeNext(buffer)
-
-		// Already found special comment starting point
-		if foundStartPos {
-			continue
-		}
-
-		// Haven't reached character count
-		if digitCount < 5 {
-			if isDigit(tkn.lastChar) {
-				// Increase digit count
-				digitCount++
-				continue
-			} else {
-				// Provided less than 5 digits, but force this to move on
-				digitCount = 5
-			}
-		}
-
-		// If no longer counting digits, ignore spaces until first non-space character
-		if unicode.IsSpace(rune(tkn.lastChar)) {
-			continue
-		}
-
-		// Found start of subexpression
-		startOffset = tkn.Position - 1
-		foundStartPos = true
 	}
-	_, sql := ExtractMysqlComment(buffer.String())
 
-	tkn.specialComment = NewStringTokenizer(sql)
-	tkn.specialComment.Position = startOffset
+	commentStr := buffer.String()
+	prefixLen := len(prefix)
+	suffixLen := 2
+	sql := commentStr[prefixLen : len(commentStr)-suffixLen]
 
+	innerSQL := sql
+	digitCount := 0
+
+	for i, c := range sql {
+		if unicode.IsDigit(c) {
+			digitCount++
+		} else {
+			break
+		}
+		if i >= 5 {
+			break
+		}
+	}
+
+	var versionDigits int
+	if prefix == "/*M!" && digitCount >= 6 && len(sql) > 6 && unicode.IsSpace(rune(sql[6])) {
+		versionDigits = 6
+	} else if digitCount >= 5 {
+		versionDigits = 5
+	} else if digitCount > 0 && digitCount < 5 {
+		return COMMENT, buffer.Bytes()
+	} else {
+		// TODO: MySQL treats comments that begin with fewer than 5 digits as normal comments.
+		versionDigits = 0
+	}
+
+	skipIndex := versionDigits
+	for skipIndex < len(sql) && unicode.IsSpace(rune(sql[skipIndex])) {
+		skipIndex++
+	}
+	innerSQL = sql[skipIndex:]
+
+	if len(innerSQL) == 0 {
+		return COMMENT, buffer.Bytes()
+	}
+
+	tkn.specialComment = NewStringTokenizer(innerSQL)
+	// Calculate position where innerSQL starts in the original buffer
+	// specialCommentEndPos points just after the closing */, go back through the suffix and innerSQL
+	// Subtract 1 more to convert from 1-indexed Position to 0-indexed string index
+	tkn.specialComment.Position = tkn.specialCommentEndPos - suffixLen - len(innerSQL) - 1
+
+	// For non-empty executable comments, scan the SQL content
 	return tkn.Scan()
 }
 
+// scanMySQLSpecificComment scans MySQL executable comments with /*! prefix.
+func (tkn *Tokenizer) scanMySQLSpecificComment() (int, []byte) {
+	return tkn.scanExecutableComment("/*!")
+}
+
+// scanMariaDBSpecificComment scans MariaDB executable comments with /*M! prefix.
+func (tkn *Tokenizer) scanMariaDBSpecificComment() (int, []byte) {
+	return tkn.scanExecutableComment("/*M!")
+}
+
+// consumeNext writes current character to buffer and advances to next character.
 func (tkn *Tokenizer) consumeNext(buffer *bytes2.Buffer) {
 	if tkn.lastChar == eofChar {
 		// This should never happen.
@@ -817,6 +859,7 @@ func (tkn *Tokenizer) consumeNext(buffer *bytes2.Buffer) {
 	tkn.next()
 }
 
+// next advances to the next character in the input stream.
 func (tkn *Tokenizer) next() {
 	if tkn.bufPos >= tkn.bufSize && tkn.InStream != nil {
 		// Try and refill the buffer

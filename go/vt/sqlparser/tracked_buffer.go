@@ -34,8 +34,8 @@ type NodeFormatter func(buf *TrackedBuffer, node SQLNode)
 // want to generate a query that's different from the default.
 type TrackedBuffer struct {
 	*strings.Builder
-	bindLocations []bindLocation
 	nodeFormatter NodeFormatter
+	bindLocations []bindLocation
 }
 
 // NewTrackedBuffer creates a new TrackedBuffer.
@@ -59,7 +59,7 @@ func (buf *TrackedBuffer) WriteNode(node SQLNode) *TrackedBuffer {
 //
 // The name must be something other than the usual Printf() to avoid "go vet"
 // warnings due to our custom format specifiers.
-func (buf *TrackedBuffer) Myprintf(format string, values ...interface{}) {
+func (buf *TrackedBuffer) Myprintf(format string, values ...any) {
 	end := len(format)
 	fieldnum := 0
 	for i := 0; i < end; {
@@ -133,7 +133,7 @@ func (buf *TrackedBuffer) HasBindVars() bool {
 }
 
 // BuildParsedQuery builds a ParsedQuery from the input.
-func BuildParsedQuery(in string, vars ...interface{}) *ParsedQuery {
+func BuildParsedQuery(in string, vars ...any) *ParsedQuery {
 	buf := NewTrackedBuffer(nil)
 	buf.Myprintf(in, vars...)
 	return buf.ParsedQuery()

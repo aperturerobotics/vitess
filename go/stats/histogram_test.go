@@ -24,7 +24,7 @@ import (
 func TestHistogram(t *testing.T) {
 	clear()
 	h := NewHistogram("hist1", "help", []int64{1, 5})
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		h.Add(int64(i))
 	}
 	want := `{"1": 2, "5": 6, "inf": 10, "Count": 10, "Total": 45}`

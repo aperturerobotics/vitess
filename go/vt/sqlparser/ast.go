@@ -26,7 +26,7 @@ import (
 	"fmt"
 	"io"
 	"runtime/trace"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,7 +56,7 @@ var zeroParser = *(yyNewParser().(*yyParserImpl))
 //
 //	showCollationFilterOpt := $4
 //	$$ = &Show{Type: string($2), ShowCollationFilterOpt: &showCollationFilterOpt}
-func yyParsePooled(yylex yyLexer) int {
+func yyParsePooled(yylex yyLexer) (ret int) {
 	// Being very particular about using the base type and not an interface type b/c we depend on
 	// the implementation to know how to reinitialize the parser.
 	var parser *yyParserImpl
@@ -71,6 +71,12 @@ func yyParsePooled(yylex yyLexer) int {
 	defer func() {
 		*parser = zeroParser
 		parserPool.Put(parser)
+	}()
+	defer func() {
+		if recoveredPanic := recover(); recoveredPanic != nil {
+			yylex.Error(fmt.Sprintf("handler caught panic: %v", recoveredPanic))
+			ret = 1
+		}
 	}()
 	return parser.Parse(yylex)
 }
@@ -97,6 +103,9 @@ type ParserOptions struct {
 	// be used to quote identifiers, regardless of whether AnsiQuotes is enabled or not. For
 	// more info, see: https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_ansi_quotes
 	AnsiQuotes bool
+	// PipesAsConcat turns double pipes into a CONCAT token. Otherwise, double pipes are synonymous with OR.
+	// PipesAsConcat mode is disabled by default.
+	PipesAsConcat bool
 }
 
 // Parse parses the SQL in full and returns a Statement, which
@@ -118,6 +127,7 @@ func ParseWithOptions(ctx context.Context, sql string, options ParserOptions) (S
 	if options.AnsiQuotes {
 		tokenizer = NewStringTokenizerForAnsiQuotes(sql)
 	}
+	tokenizer.PipesAsConcat = options.PipesAsConcat
 	return parseTokenizer(sql, tokenizer)
 }
 
@@ -139,6 +149,7 @@ func ParseOneWithOptions(ctx context.Context, sql string, options ParserOptions)
 	if options.AnsiQuotes {
 		tokenizer = NewStringTokenizerForAnsiQuotes(sql)
 	}
+	tokenizer.PipesAsConcat = options.PipesAsConcat
 	tokenizer.stopAfterFirstStmt = true
 	tree, err := parseTokenizer(sql, tokenizer)
 	if err != nil {
@@ -149,7 +160,7 @@ func ParseOneWithOptions(ctx context.Context, sql string, options ParserOptions)
 		}
 	}
 
-	return tree, tokenizer.Position-1, nil
+	return tree, tokenizer.Position - 1, nil
 }
 
 func parseTokenizer(sql string, tokenizer *Tokenizer) (Statement, error) {
@@ -469,6 +480,7 @@ func (*RollbackSavepoint) iStatement() {}
 func (*ReleaseSavepoint) iStatement()  {}
 func (*LockTables) iStatement()        {}
 func (*UnlockTables) iStatement()      {}
+func (*Binlog) iStatement()            {}
 
 // ParenSelect can actually not be a top level statement,
 // but we have to allow it because it's a requirement
@@ -482,7 +494,7 @@ type SelectStatement interface {
 	iInsertRows()
 	AddOrder(*Order)
 	SetLimit(*Limit)
-	SetLock(string)
+	SetLock(any)
 	SetOrderBy(OrderBy)
 	SetWith(*With)
 	SetInto(*Into) error
@@ -498,6 +510,7 @@ func (*ValuesStatement) iSelectStatement() {}
 type QueryOpts struct {
 	All              bool
 	Distinct         bool
+	DistinctOn       Exprs
 	StraightJoinHint bool
 	SQLCalcFoundRows bool
 	SQLCache         bool
@@ -507,6 +520,7 @@ type QueryOpts struct {
 func (q *QueryOpts) merge(other QueryOpts) error {
 	q.All = q.All || other.All
 	q.Distinct = q.Distinct || other.Distinct
+	q.DistinctOn = append(q.DistinctOn, other.DistinctOn...)
 	q.StraightJoinHint = q.StraightJoinHint || other.StraightJoinHint
 	q.SQLCalcFoundRows = q.SQLCalcFoundRows || other.SQLCalcFoundRows
 	q.SQLCache = q.SQLCache || other.SQLCache
@@ -523,7 +537,10 @@ func (q *QueryOpts) merge(other QueryOpts) error {
 	return nil
 }
 
-func (q QueryOpts) Format(buf *TrackedBuffer) {
+func (q *QueryOpts) Format(buf *TrackedBuffer) {
+	if q == nil {
+		return
+	}
 	if q.All {
 		buf.Myprintf("%s", AllStr)
 	}
@@ -544,21 +561,27 @@ func (q QueryOpts) Format(buf *TrackedBuffer) {
 	}
 }
 
+// Lock represents a lock clause
+type Lock struct {
+	Type   string     // The lock type string (e.g., " for update", " for update of t1, t2 skip locked")
+	Tables TableNames // Table names for FOR UPDATE OF clause (empty for regular FOR UPDATE)
+}
+
 // Select represents a SELECT statement.
 type Select struct {
-	Comments    Comments
-	QueryOpts   QueryOpts
+	Into        *Into
 	With        *With
-	SelectExprs SelectExprs
-	From        TableExprs
-	Where       *Where
-	GroupBy     GroupBy
+	Limit       *Limit
 	Having      *Where
+	Where       *Where
+	Lock        *Lock
+	GroupBy     GroupBy
+	Comments    Comments
 	Window      Window
 	OrderBy     OrderBy
-	Limit       *Limit
-	Lock        string
-	Into        *Into
+	SelectExprs SelectExprs
+	From        TableExprs
+	QueryOpts   QueryOpts
 }
 
 // Select.QueryOpts
@@ -576,6 +599,8 @@ const (
 	ForUpdateStr           = " for update"
 	ShareModeStr           = " lock in share mode"
 	ForUpdateSkipLockedStr = " for update skip locked"
+	ForUpdateNowaitStr     = " for update nowait"
+	ForUpdateOfStr         = " for update of"
 )
 
 // AddOrder adds an order by element
@@ -591,12 +616,22 @@ func (node *Select) SetWith(w *With) {
 	node.With = w
 }
 
-func (node *Select) SetLock(lock string) {
-	node.Lock = lock
+func (node *Select) SetLock(lock any) {
+	switch v := lock.(type) {
+	case string:
+		node.Lock = &Lock{Type: v}
+	case *Lock:
+		node.Lock = v
+	default:
+		node.Lock = nil
+	}
 }
 
 func (node *Select) SetInto(into *Into) error {
 	if into == nil {
+		return nil
+	}
+	if into.Variables == nil && into.Dumpfile == "" && into.Outfile == "" {
 		return nil
 	}
 	if node.Into != nil {
@@ -626,9 +661,13 @@ func (node *Select) Format(buf *TrackedBuffer) {
 		buf.Myprintf(" from %v", node.From)
 	}
 
+	lockStr := ""
+	if node.Lock != nil {
+		lockStr = node.Lock.Type
+	}
 	buf.Myprintf("%v%v%v%v%v%v%s%v",
 		node.Where, node.GroupBy, node.Having, node.Window,
-		node.OrderBy, node.Limit, node.Lock, node.Into)
+		node.OrderBy, node.Limit, lockStr, node.Into)
 }
 
 func (node *Select) walkSubtree(visit Visit) error {
@@ -712,7 +751,7 @@ func (node *ParenSelect) SetWith(w *With) {
 	panic("unreachable")
 }
 
-func (node *ParenSelect) SetLock(lock string) {
+func (node *ParenSelect) SetLock(lock any) {
 	panic("unreachable")
 }
 
@@ -767,13 +806,14 @@ func (s *ValuesStatement) walkSubtree(visit Visit) error {
 
 // SetOp represents a UNION, INTERSECT, and EXCEPT statement.
 type SetOp struct {
-	Type        string
-	Left, Right SelectStatement
-	OrderBy     OrderBy
-	With        *With
-	Limit       *Limit
-	Lock        string
-	Into        *Into
+	Left    SelectStatement
+	Right   SelectStatement
+	With    *With
+	Limit   *Limit
+	Into    *Into
+	Type    string
+	Lock    *Lock
+	OrderBy OrderBy
 }
 
 // SetOp.Type
@@ -807,8 +847,15 @@ func (node *SetOp) SetLimit(limit *Limit) {
 	node.Limit = limit
 }
 
-func (node *SetOp) SetLock(lock string) {
-	node.Lock = lock
+func (node *SetOp) SetLock(lock any) {
+	switch v := lock.(type) {
+	case string:
+		node.Lock = &Lock{Type: v}
+	case *Lock:
+		node.Lock = v
+	default:
+		node.Lock = nil
+	}
 }
 
 func (node *SetOp) SetInto(into *Into) error {
@@ -832,8 +879,12 @@ func (node *SetOp) GetInto() *Into {
 
 // Format formats the node.
 func (node *SetOp) Format(buf *TrackedBuffer) {
+	lockStr := ""
+	if node.Lock != nil {
+		lockStr = node.Lock.Type
+	}
 	buf.Myprintf("%v%v %s %v%v%v%s%v", node.With, node.Left, node.Type, node.Right,
-		node.OrderBy, node.Limit, node.Lock, node.Into)
+		node.OrderBy, node.Limit, lockStr, node.Into)
 }
 
 func (node *SetOp) walkSubtree(visit Visit) error {
@@ -856,17 +907,21 @@ type LoadStatement interface {
 
 // Load represents a LOAD statement
 type Load struct {
-	Local     BoolVal
-	Infile    string
-	Table     TableName
-	Partition Partitions
-	Charset   string
+	Auth AuthInformation
 	*Fields
 	*Lines
-	IgnoreNum *SQLVal
-	Columns
+	IgnoreNum       *SQLVal
+	Table           TableName
+	Infile          string
+	Charset         string
 	IgnoreOrReplace string
+	Partition       Partitions
+	Columns
+	SetExprs AssignmentExprs
+	Local    BoolVal
 }
+
+var _ AuthNode = (*Load)(nil)
 
 func (*Load) iLoadStatement() {}
 
@@ -900,7 +955,36 @@ func (node *Load) Format(buf *TrackedBuffer) {
 	if len(node.Partition) > 0 {
 		buf.Myprintf(" partition (%v)", node.Partition)
 	}
+
 	buf.Myprintf("%s%v%v%s%v", charset, node.Fields, node.Lines, ignoreNum, node.Columns)
+	if node.SetExprs != nil {
+		buf.Myprintf(" set %v", node.SetExprs)
+	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (node *Load) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *Load) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *Load) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *Load) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *Load) SetExtra(extra any) {
+	node.Auth.Extra = extra
 }
 
 func (node *Load) walkSubtree(visit Visit) error {
@@ -941,9 +1025,9 @@ func (node *Fields) Format(buf *TrackedBuffer) {
 }
 
 type EnclosedBy struct {
-	Optionally BoolVal
-	Delim      *SQLVal
 	SQLNode
+	Delim      *SQLVal
+	Optionally BoolVal
 }
 
 func (node *EnclosedBy) Format(buf *TrackedBuffer) {
@@ -1169,22 +1253,22 @@ type DeclareHandlerCondition struct {
 
 // DeclareCondition represents the DECLARE CONDITION statement
 type DeclareCondition struct {
+	MysqlErrorCode *SQLVal
 	Name           string
 	SqlStateValue  string
-	MysqlErrorCode *SQLVal
 }
 
 // DeclareCursor represents the DECLARE CURSOR statement
 type DeclareCursor struct {
-	Name       string
 	SelectStmt SelectStatement
+	Name       string
 }
 
 // DeclareHandler represents the DECLARE HANDLER statement
 type DeclareHandler struct {
+	Statement       Statement
 	Action          DeclareHandlerAction
 	ConditionValues []DeclareHandlerCondition
-	Statement       Statement
 }
 
 // DeclareVariables represents the DECLARE statement for declaring variables
@@ -1259,7 +1343,7 @@ func (d *Declare) walkSubtree(visit Visit) error {
 				return err
 			}
 		}
-		if err := Walk(visit, &d.Variables.VarType); err != nil {
+		if err := Walk(visit, d.Variables.VarType); err != nil {
 			return err
 		}
 	}
@@ -1467,8 +1551,8 @@ type Signal struct {
 
 // SignalInfo represents a piece of information for a SIGNAL statement
 type SignalInfo struct {
-	ConditionItemName SignalConditionItemName
 	Value             Expr
+	ConditionItemName SignalConditionItemName
 }
 
 // SignalConditionItemName represents the item name for the set conditions of a SIGNAL statement.
@@ -1543,10 +1627,13 @@ func (s *Resignal) Format(buf *TrackedBuffer) {
 
 // Call represents the CALL statement
 type Call struct {
+	Auth     AuthInformation
+	AsOf     Expr
 	ProcName ProcedureName
 	Params   []Expr
-	AsOf     Expr
 }
+
+var _ AuthNode = (*Call)(nil)
 
 func (c *Call) Format(buf *TrackedBuffer) {
 	buf.Myprintf("call %s", c.ProcName.String())
@@ -1565,6 +1652,31 @@ func (c *Call) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (c *Call) GetAuthInformation() AuthInformation {
+	return c.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (c *Call) SetAuthType(authType string) {
+	c.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (c *Call) SetAuthTargetType(targetType string) {
+	c.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (c *Call) SetAuthTargetNames(targetNames []string) {
+	c.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (c *Call) SetExtra(extra any) {
+	c.Auth.Extra = extra
+}
+
 func (c *Call) walkSubtree(visit Visit) error {
 	if c == nil {
 		return nil
@@ -1579,9 +1691,9 @@ func (c *Call) walkSubtree(visit Visit) error {
 
 // Stream represents a SELECT statement.
 type Stream struct {
-	Comments   Comments
 	SelectExpr SelectExpr
 	Table      TableName
+	Comments   Comments
 }
 
 // Format formats the node.
@@ -1608,16 +1720,20 @@ func (node *Stream) walkSubtree(visit Visit) error {
 // normal INSERT except if the row exists. In that case it first deletes
 // the row and re-inserts with new values. For that reason we keep it as an Insert struct.
 type Insert struct {
-	Action     string
-	Comments   Comments
-	Ignore     string
-	Table      TableName
+	Auth       AuthInformation
+	Rows       InsertRows
 	With       *With
+	Table      TableName
+	Action     string
+	Ignore     string
+	Comments   Comments
 	Partitions Partitions
 	Columns    Columns
-	Rows       InsertRows
+	Returning  SelectExprs
 	OnDup      OnDup
 }
+
+var _ AuthNode = (*Insert)(nil)
 
 const (
 	ReplaceStr = "replace"
@@ -1634,6 +1750,34 @@ func (node *Insert) Format(buf *TrackedBuffer) {
 		buf.Myprintf(" partition (%v)", node.Partitions)
 	}
 	buf.Myprintf("%v %v%v", node.Columns, node.Rows, node.OnDup)
+	if len(node.Returning) > 0 {
+		buf.Myprintf(" returning %v", node.Returning)
+	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (node *Insert) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *Insert) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *Insert) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *Insert) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *Insert) SetExtra(extra any) {
+	node.Auth.Extra = extra
 }
 
 func (node *Insert) walkSubtree(visit Visit) error {
@@ -1674,6 +1818,9 @@ type Update struct {
 	Where      *Where
 	OrderBy    OrderBy
 	Limit      *Limit
+	// Returning is specific to PostgreSQL syntax, and allows Insert statements to return
+	// results via a set of select expressions that are evaluated on the inserted rows.
+	Returning SelectExprs
 }
 
 // Format formats the node.
@@ -1710,6 +1857,9 @@ type Delete struct {
 	Where      *Where
 	OrderBy    OrderBy
 	Limit      *Limit
+	// Returning is specific to PostgreSQL syntax, and allows Insert statements to return
+	// results via a set of select expressions that are evaluated on the inserted rows.
+	Returning SelectExprs
 }
 
 // Format formats the node.
@@ -1788,20 +1938,23 @@ func (node *Set) walkSubtree(visit Visit) error {
 }
 
 type CharsetAndCollate struct {
-	Type      string //Charset = true, Collate = false
+	Type      string // Charset = true, Collate = false
 	Value     string
 	IsDefault bool
 }
 
 // DBDDL represents a CREATE, DROP database statement.
 type DBDDL struct {
+	Auth             AuthInformation
 	Action           string
 	SchemaOrDatabase string
 	DBName           string
+	CharsetCollate   []*CharsetAndCollate
 	IfNotExists      bool
 	IfExists         bool
-	CharsetCollate   []*CharsetAndCollate
 }
+
+var _ AuthNode = (*DBDDL)(nil)
 
 // Format formats the node.
 func (node *DBDDL) Format(buf *TrackedBuffer) {
@@ -1815,17 +1968,17 @@ func (node *DBDDL) Format(buf *TrackedBuffer) {
 		if len(node.DBName) > 0 {
 			dbname = fmt.Sprintf(" %s", node.DBName)
 		}
-		charsetCollateStr := ""
+		var charsetCollateStr strings.Builder
 		for _, obj := range node.CharsetCollate {
 			typeStr := strings.ToLower(obj.Type)
 			charsetDef := ""
 			if obj.IsDefault {
 				charsetDef = " default"
 			}
-			charsetCollateStr += fmt.Sprintf("%s %s %s", charsetDef, typeStr, obj.Value)
+			charsetCollateStr.WriteString(fmt.Sprintf("%s %s %s", charsetDef, typeStr, obj.Value))
 		}
 
-		buf.WriteString(fmt.Sprintf("%s %s%s%s%s", node.Action, node.SchemaOrDatabase, exists, dbname, charsetCollateStr))
+		buf.WriteString(fmt.Sprintf("%s %s%s%s%s", node.Action, node.SchemaOrDatabase, exists, dbname, charsetCollateStr.String()))
 	case DropStr:
 		exists := ""
 		if node.IfExists {
@@ -1833,6 +1986,31 @@ func (node *DBDDL) Format(buf *TrackedBuffer) {
 		}
 		buf.WriteString(fmt.Sprintf("%s %s%s %v", node.Action, node.SchemaOrDatabase, exists, node.DBName))
 	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (node *DBDDL) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *DBDDL) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *DBDDL) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *DBDDL) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *DBDDL) SetExtra(extra any) {
+	node.Auth.Extra = extra
 }
 
 type ViewCheckOption string
@@ -1844,22 +2022,22 @@ const (
 )
 
 type ViewSpec struct {
+	ViewExpr    SelectStatement
 	ViewName    TableName
-	Columns     Columns
 	Algorithm   string
 	Definer     string
 	Security    string
-	ViewExpr    SelectStatement
 	CheckOption ViewCheckOption
+	Columns     Columns
 }
 
 type TriggerSpec struct {
+	Body     Statement
+	Order    *TriggerOrder
 	TrigName TriggerName
 	Definer  string
-	Time     string // BeforeStr, AfterStr
-	Event    string // UpdateStr, InsertStr, DeleteStr
-	Order    *TriggerOrder
-	Body     Statement
+	Time     string
+	Event    string
 }
 
 type TriggerOrder struct {
@@ -1872,12 +2050,16 @@ type AlterCollationSpec struct {
 	Collation    string
 }
 
+type AlterCommentSpec struct {
+	Comment string
+}
+
 type ProcedureSpec struct {
+	Body            Statement
 	ProcName        ProcedureName
 	Definer         string
 	Params          []ProcedureParam
 	Characteristics []Characteristic
-	Body            Statement
 }
 
 type ProcedureParamDirection string
@@ -1895,17 +2077,15 @@ type ProcedureParam struct {
 }
 
 type EventSpec struct {
-	EventName            EventName
-	Definer              string
-	IfNotExists          bool
+	Body                 Statement
 	OnSchedule           *EventScheduleSpec
+	Comment              *SQLVal
+	EventName            EventName
+	RenameName           EventName
+	Definer              string
 	OnCompletionPreserve EventOnCompletion
 	Status               EventStatus
-	Comment              *SQLVal
-	Body                 Statement
-
-	// used for ALTER EVENT statement
-	RenameName EventName
+	IfNotExists          bool
 }
 
 // ValidateAlterEvent checks that at least one event field is defined to alter.
@@ -1935,9 +2115,9 @@ const (
 
 type EventScheduleSpec struct {
 	At            *EventScheduleTimeSpec
-	EveryInterval IntervalExpr
 	Starts        *EventScheduleTimeSpec
 	Ends          *EventScheduleTimeSpec
+	EveryInterval IntervalExpr
 }
 
 type EventScheduleTimeSpec struct {
@@ -1993,12 +2173,14 @@ func (c Characteristic) String() string {
 
 // AlterTable represents an ALTER table statement, which can include multiple DDL clauses.
 type AlterTable struct {
+	Auth           AuthInformation
 	Table          TableName
 	Statements     []*DDL
 	PartitionSpecs []*PartitionSpec
 }
 
 var _ SQLNode = (*AlterTable)(nil)
+var _ AuthNode = (*AlterTable)(nil)
 
 // Format implements SQLNode.
 func (m *AlterTable) Format(buf *TrackedBuffer) {
@@ -2017,11 +2199,35 @@ func (m *AlterTable) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (m *AlterTable) GetAuthInformation() AuthInformation {
+	return m.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (m *AlterTable) SetAuthType(authType string) {
+	m.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (m *AlterTable) SetAuthTargetType(targetType string) {
+	m.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (m *AlterTable) SetAuthTargetNames(targetNames []string) {
+	m.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (m *AlterTable) SetExtra(extra any) {
+	m.Auth.Extra = extra
+}
+
 // walkSubtree implements SQLNode.
 func (m *AlterTable) walkSubtree(visit Visit) error {
 	for _, ddl := range m.Statements {
-		err := ddl.walkSubtree(visit)
-		if err != nil {
+		if err := Walk(visit, ddl); err != nil {
 			return err
 		}
 	}
@@ -2030,99 +2236,95 @@ func (m *AlterTable) walkSubtree(visit Visit) error {
 
 // DDL represents a CREATE, ALTER, DROP, RENAME, TRUNCATE or ANALYZE statement.
 type DDL struct {
-	Action string
-
-	// Set for column alter statements
-	ColumnAction string
-
-	// Set for constraint alter statements
-	ConstraintAction string
-
-	// Set for column add / drop / rename statements
-	Column ColIdent
-
+	// Auth handles authentication for the node itself.
+	Auth AuthInformation
+	// Authentication is set for ALTER USER operations.
+	Authentication *Authentication
 	// Set for column add / drop / modify statements that specify a column order
 	ColumnOrder *ColumnOrder
+	// ViewSpec is set for CREATE VIEW operations.
+	ViewSpec *ViewSpec
+	// AutoIncSpec is set for AddAutoIncStr.
+	AutoIncSpec *AutoIncSpec
+	// IndexSpec is set for all ALTER operations on an index
+	IndexSpec *IndexSpec
+	// DefaultSpec is set for SET / DROP DEFAULT operations
+	DefaultSpec *DefaultSpec
+	// TriggerSpec is set for CREATE / ALTER / DROP trigger operations
+	TriggerSpec *TriggerSpec
+	// ProcedureSpec is set for CREATE PROCEDURE operations
+	ProcedureSpec *ProcedureSpec
+	// AlterCollationSpec is set for CHARACTER SET / COLLATE operations on ALTER statements
+	AlterCollationSpec *AlterCollationSpec
+	// AlterCommentSpec is set for COMMENT operations on ALTER statements
+	AlterCommentSpec *AlterCommentSpec
+	// EventSpec is set for CREATE EVENT operations
+	EventSpec *EventSpec
+	// NotNullSpec is set when adding or dropping a NOT NULL constraint on a column
+	NotNullSpec *NotNullSpec
+	// ColumnTypeSpec is set when altering a column's type, without specifying the full column definition
+	ColumnTypeSpec *ColumnTypeSpec
+	// OptSelect is set for CREATE TABLE <> AS SELECT operations.
+	OptSelect *OptSelect
+	OptLike   *OptLike
+	// TableSpec contains the full table spec in case of a create, or a single column in case of an add, drop, or alter.
+	TableSpec     *TableSpec
+	PartitionSpec *PartitionSpec
 
-	// Set for column rename
-	ToColumn ColIdent
-
-	// FromTables is set if Action is RenameStr or DropStr.
-	FromTables TableNames
-
-	// ToTables is set if Action is RenameStr.
-	ToTables TableNames
+	// AccountLimits is set for ALTER USER operations.
+	AccountLimits *AccountLimits
 
 	// Table is set if Action is other than RenameStr or DropStr.
 	Table TableName
+	// Set for column rename
+	ToColumn ColIdent
+	// Set for column add / drop / rename statements
+	Column ColIdent
 
-	// ViewSpec is set for CREATE VIEW operations.
-	ViewSpec *ViewSpec
+	// Set for any DDL statement
+	Action string
+	// Set for column alter statements
+	ColumnAction string
+	// Set for constraint alter statements
+	ConstraintAction string
 
-	// This exposes the start and end index of the string that makes up the sub statement of the query given.
-	// Meaning is specific to the different kinds of statements with sub statements, e.g. views, trigger definitions.
-	// For statements defined within a MySQL special comment (/*! */), we have to fudge the offset a bit because we won't
-	// get the final lexer position token until after the comment close.
-	SpecialCommentMode        bool
-	SubStatementPositionStart int
-	SubStatementPositionEnd   int
 	// SubStatementStr will have the sub statement as a string rather than having to slice the original query.
 	// If it's empty, then use the position start and end values to slice the sub statement out of the original query.
 	SubStatementStr string
 
+	// User is set for ALTER USER operations.
+	User AccountName
+
 	// FromViews is set if Action is DropStr.
-	FromViews TableNames
+	FromViews  TableNames
+	FromTables TableNames
+	ToTables   TableNames
+
+	SubStatementPositionStart int
+	SubStatementPositionEnd   int
 
 	// The following fields are set if a DDL was fully analyzed.
 	IfExists    bool
 	IfNotExists bool
 	OrReplace   bool
 
-	// TableSpec contains the full table spec in case of a create, or a single column in case of an add, drop, or alter.
-	TableSpec     *TableSpec
-	OptLike       *OptLike
-	PartitionSpec *PartitionSpec
-
-	// AutoIncSpec is set for AddAutoIncStr.
-	AutoIncSpec *AutoIncSpec
-
-	// IndexSpec is set for all ALTER operations on an index
-	IndexSpec *IndexSpec
-
-	// DefaultSpec is set for SET / DROP DEFAULT operations
-	DefaultSpec *DefaultSpec
-
-	// TriggerSpec is set for CREATE / ALTER / DROP trigger operations
-	TriggerSpec *TriggerSpec
-
-	// ProcedureSpec is set for CREATE PROCEDURE operations
-	ProcedureSpec *ProcedureSpec
-
-	// AlterCollationSpec is set for CHARACTER SET / COLLATE operations on ALTER statements
-	AlterCollationSpec *AlterCollationSpec
-
-	// EventSpec is set for CREATE EVENT operations
-	EventSpec *EventSpec
-
 	// Temporary is set for CREATE TEMPORARY TABLE operations.
-	Temporary bool
+	Temporary          bool
+	ConstraintIfExists bool
 
-	// OptSelect is set for CREATE TABLE <> AS SELECT operations.
-	OptSelect *OptSelect
-
-	// User is set for ALTER USER operations.
-	User AccountName
-
-	// Authentication is set for ALTER USER operations.
-	Authentication *Authentication
+	// This exposes the start and end index of the string that makes up the sub statement of the query given.
+	// Meaning is specific to the different kinds of statements with sub statements, e.g. views, trigger definitions.
+	// For statements defined within a MySQL special comment (/*! */), we have to fudge the offset a bit because we won't
+	// get the final lexer position token until after the comment close.
+	SpecialCommentMode bool
 }
+
+var _ AuthNode = (*DDL)(nil)
 
 // ColumnOrder is used in some DDL statements to specify or change the order of a column in a schema.
 type ColumnOrder struct {
-	// First is true if this column should be first in the schema
-	First bool
-	// AfterColumn is set if this column should be after the one named
 	AfterColumn ColIdent
+	First       bool
 }
 
 // DDL strings.
@@ -2148,6 +2350,7 @@ const (
 	UniqueStr     = "unique"
 	SpatialStr    = "spatial"
 	FulltextStr   = "fulltext"
+	VectorStr     = "vector"
 	SetStr        = "set"
 	TemporaryStr  = "temporary"
 	PrimaryStr    = "primary"
@@ -2177,7 +2380,11 @@ func (node *DDL) Format(buf *TrackedBuffer) {
 			if view.CheckOption != ViewCheckOptionUnspecified {
 				checkOpt = fmt.Sprintf(" with %s check option", view.CheckOption)
 			}
-			buf.Myprintf("%s %sview %v%v as %v%s", node.Action, afterCreate, view.ViewName, view.Columns, view.ViewExpr, checkOpt)
+			notExists := ""
+			if node.IfNotExists {
+				notExists = " if not exists"
+			}
+			buf.Myprintf("%s %sview%s %v%v as %v%s", node.Action, afterCreate, notExists, view.ViewName, view.Columns, view.ViewExpr, checkOpt)
 		} else if node.TriggerSpec != nil {
 			trigger := node.TriggerSpec
 			triggerDef := ""
@@ -2267,7 +2474,7 @@ func (node *DDL) Format(buf *TrackedBuffer) {
 					buf.Myprintf("%s%s table%s %v %v%v", node.Action, temporary, notExists, node.Table, node.TableSpec, node.OptSelect)
 				}
 			} else if node.OptSelect != nil {
-				buf.Myprintf("%s%s table%s %v %v", node.Action, temporary, notExists, node.Table, node.OptSelect)
+				buf.Myprintf("%s%s table%s %v%v", node.Action, temporary, notExists, node.Table, node.OptSelect)
 			} else {
 				buf.Myprintf("%s%s table%s %v", node.Action, temporary, notExists, node.Table)
 			}
@@ -2298,7 +2505,11 @@ func (node *DDL) Format(buf *TrackedBuffer) {
 			}
 			buf.Myprintf(fmt.Sprintf("%s event%s %v", node.Action, exists, node.EventSpec.EventName))
 		} else {
-			buf.Myprintf("%s table%s %v", node.Action, exists, node.FromTables)
+			temporary := ""
+			if node.Temporary {
+				temporary = " " + TemporaryStr
+			}
+			buf.Myprintf("%s%s table%s %v", node.Action, temporary, exists, node.FromTables)
 		}
 	case RenameStr:
 		buf.Myprintf("%s table %v to %v", node.Action, node.FromTables[0], node.ToTables[0])
@@ -2356,6 +2567,9 @@ func (node *DDL) Format(buf *TrackedBuffer) {
 				ifExists = "if exists "
 			}
 			buf.Myprintf("%s user %s%s %s", node.Action, ifExists, node.User.String(), node.Authentication.String())
+			if node.AccountLimits != nil {
+				buf.Myprintf(" with %s", node.AccountLimits.String())
+			}
 			node.alterFormat(buf)
 		} else {
 			buf.Myprintf(fmt.Sprintf("unsupported alter command: %v", node))
@@ -2370,6 +2584,31 @@ func (node *DDL) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (node *DDL) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *DDL) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *DDL) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *DDL) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *DDL) SetExtra(extra any) {
+	node.Auth.Extra = extra
+}
+
 func (node *DDL) walkSubtree(visit Visit) error {
 	if node == nil {
 		return nil
@@ -2381,8 +2620,14 @@ func (node *DDL) walkSubtree(visit Visit) error {
 	}
 
 	if node.ViewSpec != nil {
-		err := Walk(visit, node.ViewSpec.ViewExpr)
-		return err
+		if err := Walk(visit, node.ViewSpec.ViewExpr); err != nil {
+			return err
+		}
+	}
+	if node.OptSelect != nil {
+		if err := Walk(visit, node.OptSelect.Select); err != nil {
+			return err
+		}
 	}
 	// TODO: add missing nodes that are walkable
 	return nil
@@ -2456,6 +2701,8 @@ func (node *DDL) alterFormat(buf *TrackedBuffer) {
 		if len(node.AlterCollationSpec.Collation) > 0 {
 			buf.Myprintf(" collate %s", node.AlterCollationSpec.Collation)
 		}
+	} else if node.AlterCommentSpec != nil {
+		buf.Myprintf(" comment '%s'", node.AlterCommentSpec.Comment)
 	}
 }
 
@@ -2487,19 +2734,20 @@ const (
 
 // OptLike works for create table xxx like xxx
 type OptLike struct {
-	LikeTable TableName
+	// MySQL only allows single table in LIKE clause, but Postgres allows multiple tables in their `INHERIT` clause
+	LikeTables []TableName
 }
 
 // Format formats the node.
 func (node *OptLike) Format(buf *TrackedBuffer) {
-	buf.Myprintf("like %v", node.LikeTable)
+	buf.Myprintf("like %v", node.LikeTables[0])
 }
 
 func (node *OptLike) walkSubtree(visit Visit) error {
 	if node == nil {
 		return nil
 	}
-	return Walk(visit, node.LikeTable)
+	return Walk(visit, node.LikeTables[0])
 }
 
 type OptSelect struct {
@@ -2508,7 +2756,7 @@ type OptSelect struct {
 
 // Format formats the node.
 func (node *OptSelect) Format(buf *TrackedBuffer) {
-	buf.Myprintf("as %v", node.Select) // purposely display the AS
+	buf.Myprintf(" as %v", node.Select) // purposely display the AS
 }
 
 func (node *OptSelect) walkSubtree(visit Visit) error {
@@ -2520,13 +2768,13 @@ func (node *OptSelect) walkSubtree(visit Visit) error {
 
 // PartitionSpec describe partition actions (for alter and create)
 type PartitionSpec struct {
+	Number         *SQLVal
+	TableName      TableName
 	Action         string
-	IsAll          bool
 	Names          Partitions
 	Definitions    []*PartitionDefinition
+	IsAll          bool
 	WithValidation bool
-	TableName      TableName
-	Number         *SQLVal
 }
 
 // Format formats the node.
@@ -2571,7 +2819,7 @@ func (node *PartitionSpec) Format(buf *TrackedBuffer) {
 	case RemoveStr:
 		buf.Myprintf(" %s partitioning", node.Action)
 	default:
-		//panic("unimplemented")
+		// panic("unimplemented")
 	}
 }
 
@@ -2592,8 +2840,8 @@ func (node *PartitionSpec) walkSubtree(visit Visit) error {
 
 // PartitionDefinition describes a very minimal partition definition
 type PartitionDefinition struct {
-	Name     ColIdent
 	Limit    Expr
+	Name     ColIdent
 	Maxvalue bool
 }
 
@@ -2619,28 +2867,40 @@ func (node *PartitionDefinition) walkSubtree(visit Visit) error {
 
 // TableSpec describes the structure of a table from a CREATE TABLE statement
 type TableSpec struct {
+	PartitionOpt *PartitionOption
 	Columns      []*ColumnDefinition
 	Indexes      []*IndexDefinition
 	Constraints  []*ConstraintDefinition
 	TableOpts    []*TableOption
-	PartitionOpt *PartitionOption
 }
 
 // Format formats the node.
 func (ts *TableSpec) Format(buf *TrackedBuffer) {
 	buf.Myprintf("(\n")
+	emptyList := true
 	for i, col := range ts.Columns {
 		if i == 0 {
 			buf.Myprintf("\t%v", col)
 		} else {
 			buf.Myprintf(",\n\t%v", col)
 		}
+		emptyList = false
 	}
 	for _, idx := range ts.Indexes {
-		buf.Myprintf(",\n\t%v", idx)
+		if emptyList {
+			buf.Myprintf("\t%v", idx)
+			emptyList = false
+		} else {
+			buf.Myprintf(",\n\t%v", idx)
+		}
 	}
 	for _, c := range ts.Constraints {
-		buf.Myprintf(",\n\t%v", c)
+		if emptyList {
+			buf.Myprintf("\t%v", c)
+			emptyList = true
+		} else {
+			buf.Myprintf(",\n\t%v", c)
+		}
 	}
 	buf.Myprintf("\n)")
 	for _, tblOpt := range ts.TableOpts {
@@ -2650,7 +2910,7 @@ func (ts *TableSpec) Format(buf *TrackedBuffer) {
 		buf.Myprintf(" %v", ts.PartitionOpt)
 	}
 
-	//buf.Myprintf("\n)%s", strings.Replace(ts.TableOpts, ", ", ",\n  ", -1))
+	// buf.Myprintf("\n)%s", strings.Replace(ts.TableOpts, ", ", ",\n  ", -1))
 }
 
 // AddColumn appends the given column to the list in the spec
@@ -2712,7 +2972,7 @@ type ColumnDefinition struct {
 
 // Format formats the node.
 func (col *ColumnDefinition) Format(buf *TrackedBuffer) {
-	buf.Myprintf("%v %v", col.Name, &col.Type)
+	buf.Myprintf("%v %v", col.Name, col.Type)
 }
 
 func (col *ColumnDefinition) walkSubtree(visit Visit) error {
@@ -2722,58 +2982,62 @@ func (col *ColumnDefinition) walkSubtree(visit Visit) error {
 	return Walk(
 		visit,
 		col.Name,
-		&col.Type,
+		col.Type,
 	)
 }
 
 // ColumnType represents a sql type in a CREATE TABLE or ALTER TABLE statement
 // All optional fields are nil if not specified
 type ColumnType struct {
+	// The base type if it has already been resolved
+	ResolvedType any
+
+	Default       Expr
+	OnUpdate      Expr
+	GeneratedExpr Expr // The expression used to generate this column
+
+	// Check constraint specification
+	Constraint *ConstraintDefinition
+	// Foreign key specification
+	ForeignKeyDef *ForeignKeyDefinition
+
+	// For spatial types
+	SRID *SQLVal
+
+	// Numeric field options
+	Length *SQLVal
+	Scale  *SQLVal
+
+	Comment *SQLVal
+
+	// Enum values
+	EnumValues []string
+
 	// The base type string
 	Type string
 
-	// The base type if it has already been resolved
-	ResolvedType any
+	// Text field options
+	Charset string
+	Collate string
+
+	// Key specification
+	KeyOpt ColumnKeyOption
+
+	// More text field options
+	BinaryCollate bool
 
 	// Generic field options.
 	Null          BoolVal
 	NotNull       BoolVal
 	Autoincrement BoolVal
-	Default       Expr
-	OnUpdate      Expr
-	Comment       *SQLVal
 	sawnull       bool
 	sawai         bool
 
-	// Numeric field options
-	Length   *SQLVal
+	// More numeric field options
 	Unsigned BoolVal
 	Zerofill BoolVal
-	Scale    *SQLVal
 
-	// Text field options
-	Charset       string
-	Collate       string
-	BinaryCollate bool
-
-	// Enum values
-	EnumValues []string
-
-	// Key specification
-	KeyOpt ColumnKeyOption
-
-	// Foreign key specification
-	ForeignKeyDef *ForeignKeyDefinition
-
-	// Check constraint specification
-	Constraint *ConstraintDefinition
-
-	// Generated columns
-	GeneratedExpr Expr    // The expression used to generate this column
-	Stored        BoolVal // Default is Virtual (not stored)
-
-	// For spatial types
-	SRID *SQLVal
+	Stored BoolVal // Default is Virtual (not stored)
 }
 
 func (ct *ColumnType) merge(other ColumnType) error {
@@ -2807,7 +3071,7 @@ func (ct *ColumnType) merge(other ColumnType) error {
 
 	if other.KeyOpt != colKeyNone {
 		keyOptions := []ColumnKeyOption{ct.KeyOpt, other.KeyOpt}
-		sort.Slice(keyOptions, func(i, j int) bool { return keyOptions[i] < keyOptions[j] })
+		slices.Sort(keyOptions)
 		if other.KeyOpt == ct.KeyOpt {
 			// MySQL will deduplicate key options when they are repeated.
 		} else if keyOptions[0] == colKeyPrimary && (keyOptions[1] == colKeyUnique || keyOptions[1] == colKeyUniqueKey) {
@@ -2892,7 +3156,7 @@ func (ct *ColumnType) merge(other ColumnType) error {
 }
 
 // Format returns a canonical string representation of the type and all relevant options
-func (ct *ColumnType) Format(buf *TrackedBuffer) {
+func (ct ColumnType) Format(buf *TrackedBuffer) {
 	if stringer, ok := ct.ResolvedType.(fmt.Stringer); ok {
 		buf.WriteString(stringer.String())
 	} else {
@@ -2987,7 +3251,7 @@ func (ct *ColumnType) Format(buf *TrackedBuffer) {
 }
 
 // String returns a canonical string representation of the type and all relevant options
-func (ct *ColumnType) String() string {
+func (ct ColumnType) String() string {
 	buf := NewTrackedBuffer(nil)
 	ct.Format(buf)
 	return buf.String()
@@ -2995,7 +3259,7 @@ func (ct *ColumnType) String() string {
 
 // DescribeType returns the abbreviated type information as required for
 // describe table
-func (ct *ColumnType) DescribeType() string {
+func (ct ColumnType) DescribeType() string {
 	buf := NewTrackedBuffer(nil)
 	buf.Myprintf("%s", ct.Type)
 	if ct.Length != nil && ct.Scale != nil {
@@ -3018,7 +3282,7 @@ func (ct *ColumnType) DescribeType() string {
 }
 
 // SQLType returns the sqltypes type code for the given column
-func (ct *ColumnType) SQLType() querypb.Type {
+func (ct ColumnType) SQLType() querypb.Type {
 	switch strings.ToLower(ct.Type) {
 	case keywordStrings[TINYINT]:
 		if ct.Unsigned {
@@ -3059,7 +3323,8 @@ func (ct *ColumnType) SQLType() querypb.Type {
 	case keywordStrings[BLOB],
 		keywordStrings[TINYBLOB],
 		keywordStrings[MEDIUMBLOB],
-		keywordStrings[LONGBLOB]:
+		keywordStrings[LONGBLOB],
+		"long varbinary":
 		return sqltypes.Blob
 	case keywordStrings[CHAR],
 		keywordStrings[CHARACTER],
@@ -3091,10 +3356,12 @@ func (ct *ColumnType) SQLType() querypb.Type {
 		return sqltypes.Timestamp
 	case keywordStrings[YEAR]:
 		return sqltypes.Year
-	case keywordStrings[FLOAT_TYPE]:
+	case keywordStrings[FLOAT_TYPE],
+		keywordStrings[FLOAT4]:
 		return sqltypes.Float32
 	case keywordStrings[DOUBLE],
 		keywordStrings[REAL],
+		keywordStrings[FLOAT8],
 		"double precision":
 		return sqltypes.Float64
 	case keywordStrings[DECIMAL],
@@ -3110,6 +3377,8 @@ func (ct *ColumnType) SQLType() querypb.Type {
 		return sqltypes.Set
 	case keywordStrings[JSON]:
 		return sqltypes.TypeJSON
+	case keywordStrings[VECTOR]:
+		return sqltypes.Vector
 	case keywordStrings[GEOMETRY],
 		keywordStrings[POINT],
 		keywordStrings[LINESTRING],
@@ -3144,8 +3413,8 @@ func (jte *JSONTableExpr) walkSubtree(visit Visit) error {
 
 // JSONTableSpec describes the structure of a table from a JSON_TABLE() statement
 type JSONTableSpec struct {
-	Columns []*JSONTableColDef
 	Path    string
+	Columns []*JSONTableColDef
 }
 
 // AddColumn appends the given column to the list in the spec
@@ -3182,10 +3451,10 @@ func (ts *JSONTableSpec) walkSubtree(visit Visit) error {
 
 // JSONTableColDef describes a column in a JSON_TABLE statement
 type JSONTableColDef struct {
-	Name ColIdent
-	Type ColumnType
-	Opts JSONTableColOpts
 	Spec *JSONTableSpec
+	Name ColIdent
+	Opts JSONTableColOpts
+	Type ColumnType
 }
 
 // Format formats the node.
@@ -3201,7 +3470,7 @@ func (col *JSONTableColDef) Format(buf *TrackedBuffer) {
 		if col.Type.Autoincrement {
 			buf.Myprintf("%v %s", col.Name, "FOR ORDINALITY")
 		} else {
-			buf.Myprintf("%v %v%s %s %v", col.Name, &col.Type, exists, keywordStrings[PATH], col.Opts)
+			buf.Myprintf("%v %v%s %s %v", col.Name, col.Type, exists, keywordStrings[PATH], col.Opts)
 		}
 	}
 }
@@ -3213,17 +3482,17 @@ func (col *JSONTableColDef) walkSubtree(visit Visit) error {
 	return Walk(
 		visit,
 		col.Name,
-		&col.Type,
+		col.Type,
 	)
 }
 
 // JSONTableColOpts describes the column options in a JSON_TABLE statement
 type JSONTableColOpts struct {
-	Path         string
 	ValOnEmpty   Expr
 	ValOnError   Expr
-	ErrorOnEmpty bool // TODO: not necessary, can be inferred from ValOnEmpty == nil
-	ErrorOnError bool // TODO: not necessary, can be inferred from ValOnError == nil
+	Path         string
+	ErrorOnEmpty bool
+	ErrorOnError bool
 	Exists       bool
 }
 
@@ -3264,6 +3533,15 @@ type IndexSpec struct {
 	Columns []*IndexColumn
 	// Options contains the index options when creating an index
 	Options []*IndexOption
+	// Expression contains the expression when creating a functional index
+	// TODO: Not fully implemented. Parser should support expressions for ALTER TABLE and CREATE TABLE statements
+	// TODO: Also needs to support mixes of columns and expressions.
+	Expression Expr
+
+	// ifExists and ifNotExists states whether `IF [NOT] EXISTS` was present in query
+	//   This is solely for printing purposes; we rely on the one in ast.DDL for actual logic
+	ifExists    bool
+	ifNotExists bool
 }
 
 func (idx *IndexSpec) Format(buf *TrackedBuffer) {
@@ -3281,9 +3559,13 @@ func (idx *IndexSpec) Format(buf *TrackedBuffer) {
 				buf.Myprintf("%s ", idx.Type)
 			}
 		}
+		notExists := ""
+		if idx.ifNotExists {
+			notExists = " if not exists"
+		}
 
 		if idx.Type != PrimaryStr {
-			buf.Myprintf("index %s ", idx.ToName.val)
+			buf.Myprintf("index%s %s ", notExists, idx.ToName.val)
 		}
 
 		if idx.Using.val != "" {
@@ -3291,19 +3573,25 @@ func (idx *IndexSpec) Format(buf *TrackedBuffer) {
 		}
 
 		buf.Myprintf("(")
-		for i, col := range idx.Columns {
-			if i != 0 {
-				buf.Myprintf(", %s", col.Column.val)
-			} else {
-				buf.Myprintf("%s", col.Column.val)
-			}
-			if col.Length != nil {
-				buf.Myprintf("(%v)", col.Length)
-			}
-			if col.Order != AscScr {
-				buf.Myprintf(" %s", col.Order)
+
+		if idx.Expression != nil {
+			buf.Myprintf("(%v)", idx.Expression)
+		} else {
+			for i, col := range idx.Columns {
+				if i != 0 {
+					buf.Myprintf(", %s", col.Column.val)
+				} else {
+					buf.Myprintf("%s", col.Column.val)
+				}
+				if col.Length != nil {
+					buf.Myprintf("(%v)", col.Length)
+				}
+				if col.Order != AscScr {
+					buf.Myprintf(" %s", col.Order)
+				}
 			}
 		}
+
 		buf.Myprintf(")")
 		for _, opt := range idx.Options {
 			buf.Myprintf(" %s", opt.Name)
@@ -3314,10 +3602,14 @@ func (idx *IndexSpec) Format(buf *TrackedBuffer) {
 			}
 		}
 	case "drop":
+		exists := ""
+		if idx.ifExists {
+			exists = " if exists"
+		}
 		if idx.Type == PrimaryStr {
 			buf.Myprintf("drop primary key")
 		} else {
-			buf.Myprintf("drop index %s", idx.ToName.val)
+			buf.Myprintf("drop index%s %s", exists, idx.ToName.val)
 		}
 	case "rename":
 		buf.Myprintf("rename index %s to %s", idx.FromName.val, idx.ToName.val)
@@ -3395,6 +3687,7 @@ type IndexInfo struct {
 	Spatial  bool
 	Unique   bool
 	Fulltext bool
+	Vector   bool
 }
 
 // Format formats the node.
@@ -3442,14 +3735,14 @@ type TableOption struct {
 
 // PartitionOption describes a partition option in a CREATE TABLE statement
 type PartitionOption struct {
-	PartitionType string // HASH, KEY, RANGE, LIST
-	IsLinear      bool
-	KeyAlgorithm  string
-	ColList       Columns
 	Expr          Expr
 	Partitions    *SQLVal
 	SubPartition  *SubPartition
+	PartitionType string // HASH, KEY, RANGE, LIST
+	KeyAlgorithm  string
+	ColList       Columns
 	Definitions   []*PartitionDefinition
+	IsLinear      bool
 }
 
 // Format formats the node.
@@ -3488,12 +3781,12 @@ func (node *PartitionOption) Format(buf *TrackedBuffer) {
 
 // SubPartition describes subpartitions control
 type SubPartition struct {
-	PartitionType string
-	IsLinear      bool
-	KeyAlgorithm  string
-	ColList       Columns
 	Expr          Expr
 	SubPartitions *SQLVal
+	PartitionType string
+	KeyAlgorithm  string
+	ColList       Columns
+	IsLinear      bool
 }
 
 // Format formats the node.
@@ -3533,9 +3826,9 @@ const (
 
 // AutoIncSpec defines an autoincrement value for a ADD AUTO_INCREMENT statement
 type AutoIncSpec struct {
-	Column   ColIdent
-	Sequence TableName
 	Value    Expr
+	Sequence TableName
+	Column   ColIdent
 }
 
 // Format formats the node.
@@ -3549,11 +3842,54 @@ func (node *AutoIncSpec) walkSubtree(visit Visit) error {
 	return err
 }
 
-// DefaultSpec defines a SET / DROP on a column for its default value.
-type DefaultSpec struct {
+// ColumnTypeSpec defines a change to a column's type, without fully specifying the column definition.
+type ColumnTypeSpec struct {
+	Column ColIdent
+	Type   ColumnType
+}
+
+var _ SQLNode = (*ColumnTypeSpec)(nil)
+
+func (node ColumnTypeSpec) Format(buf *TrackedBuffer) {
+	buf.Myprintf("alter column %v type ")
+	node.Type.Format(buf)
+}
+
+// walkSubtree implements SQLNode.
+func (node *ColumnTypeSpec) walkSubtree(visit Visit) error {
+	return Walk(visit, node.Column)
+}
+
+// NotNullSpec defines a SET / DROP on a column for its NOT NULL constraint.
+type NotNullSpec struct {
+	// Action is SET to set a NOT NULL constraint on a column, or DROP to drop
+	// a NOT NULL constraint on a column.
 	Action string
 	Column ColIdent
+}
+
+var _ SQLNode = (*NotNullSpec)(nil)
+
+// Format implements SQLNode.
+func (node *NotNullSpec) Format(buf *TrackedBuffer) {
+	switch node.Action {
+	case SetStr:
+		buf.Myprintf("alter column %v set not null", node.Column)
+	case DropStr:
+		buf.Myprintf("alter column %v drop not null", node.Column)
+	}
+}
+
+// walkSubtree implements SQLNode.
+func (node *NotNullSpec) walkSubtree(visit Visit) error {
+	return Walk(visit, node.Column)
+}
+
+// DefaultSpec defines a SET / DROP on a column for its default value.
+type DefaultSpec struct {
 	Value  Expr
+	Column ColIdent
+	Action string
 }
 
 var _ SQLNode = (*DefaultSpec)(nil)
@@ -3575,8 +3911,8 @@ func (node *DefaultSpec) walkSubtree(visit Visit) error {
 
 // ConstraintDefinition describes a constraint in a CREATE TABLE statement
 type ConstraintDefinition struct {
-	Name    string
 	Details ConstraintInfo
+	Name    string
 }
 
 // ConstraintInfo details a constraint in a CREATE TABLE statement
@@ -3631,10 +3967,10 @@ func (a ReferenceAction) Format(buf *TrackedBuffer) {
 
 // ForeignKeyDefinition describes a foreign key
 type ForeignKeyDefinition struct {
-	Source            Columns
 	ReferencedTable   TableName
-	ReferencedColumns Columns
 	Index             string
+	Source            Columns
+	ReferencedColumns Columns
 	OnDelete          ReferenceAction
 	OnUpdate          ReferenceAction
 }
@@ -3699,8 +4035,9 @@ const (
 // Explain represents an explain statement
 type Explain struct {
 	Statement     Statement
-	Analyze       bool
 	ExplainFormat string
+	Plan          bool
+	Analyze       bool
 }
 
 // Format formats the node.
@@ -3713,7 +4050,11 @@ func (node *Explain) Format(buf *TrackedBuffer) {
 	if !node.Analyze && node.ExplainFormat != "" {
 		formatOpt = fmt.Sprintf("format = %s ", node.ExplainFormat)
 	}
-	buf.Myprintf("explain %s%s%v", analyzeOpt, formatOpt, node.Statement)
+	planOpt := ""
+	if node.Plan {
+		planOpt = "plan "
+	}
+	buf.Myprintf("explain %s%s%s%v", analyzeOpt, formatOpt, planOpt, node.Statement)
 }
 
 const (
@@ -3721,6 +4062,7 @@ const (
 	CreateProcedureStr = "create procedure"
 	CreateEventStr     = "create event"
 	CreateTableStr     = "create table"
+	CreateViewStr      = "create view"
 
 	ProcedureStatusStr = "procedure status"
 	FunctionStatusStr  = "function status"
@@ -3729,19 +4071,23 @@ const (
 
 // Show represents a show statement.
 type Show struct {
-	Type                   string
-	Table                  TableName
-	Database               string
-	IfNotExists            bool
-	ShowTablesOpt          *ShowTablesOpt
-	Scope                  string
 	ShowCollationFilterOpt Expr
 	ShowIndexFilterOpt     Expr
 	Filter                 *ShowFilter
 	Limit                  *Limit
+	ShowTablesOpt          *ShowTablesOpt
+	Table                  TableName
+	Scope                  string
+	Database               string
+	Type                   string
+	Auth                   AuthInformation
+	IfNotExists            bool
 	CountStar              bool
 	Full                   bool
+	Extended               bool
 }
+
+var _ AuthNode = (*Show)(nil)
 
 // Format formats the node.
 func (node *Show) Format(buf *TrackedBuffer) {
@@ -3750,6 +4096,9 @@ func (node *Show) Format(buf *TrackedBuffer) {
 	case "tables", "columns", "fields":
 		if node.ShowTablesOpt != nil {
 			buf.Myprintf("show ")
+			if node.Extended {
+				buf.Myprintf("extended ")
+			}
 			if node.Full {
 				buf.Myprintf("full ")
 			}
@@ -3838,6 +4187,31 @@ func (node *Show) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (node *Show) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *Show) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *Show) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *Show) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *Show) SetExtra(extra any) {
+	node.Auth.Extra = extra
+}
+
 // HasTable returns true if the show statement has a parsed table name.
 // Not all show statements parse table names.
 func (node *Show) HasTable() bool {
@@ -3861,9 +4235,10 @@ func (node *Show) walkSubtree(visit Visit) error {
 
 // ShowTablesOpt is show tables option
 type ShowTablesOpt struct {
-	DbName string
-	Filter *ShowFilter
-	AsOf   Expr
+	AsOf       Expr
+	Filter     *ShowFilter
+	DbName     string
+	SchemaName string
 }
 
 // Format formats the node.
@@ -3871,9 +4246,15 @@ func (node *ShowTablesOpt) Format(buf *TrackedBuffer) {
 	if node == nil {
 		return
 	}
-	if node.DbName != "" {
+
+	if node.SchemaName != "" && node.DbName != "" {
+		buf.Myprintf(" from %s.%s", node.DbName, node.SchemaName)
+	} else if node.DbName != "" {
 		buf.Myprintf(" from %s", node.DbName)
+	} else if node.SchemaName != "" {
+		buf.Myprintf(" from %s", node.SchemaName)
 	}
+
 	if node.AsOf != nil {
 		buf.Myprintf(" as of ")
 		node.AsOf.Format(buf)
@@ -3892,8 +4273,8 @@ func (node *ShowTablesOpt) walkSubtree(visit Visit) error {
 
 // ShowFilter is show tables filter
 type ShowFilter struct {
-	Like   string
 	Filter Expr
+	Like   string
 }
 
 // Format formats the node.
@@ -3918,7 +4299,10 @@ func (node *ShowFilter) walkSubtree(visit Visit) error {
 // Use represents a use statement.
 type Use struct {
 	DBName TableIdent
+	Auth   AuthInformation
 }
+
+var _ AuthNode = (*Use)(nil)
 
 // Format formats the node.
 func (node *Use) Format(buf *TrackedBuffer) {
@@ -3927,6 +4311,31 @@ func (node *Use) Format(buf *TrackedBuffer) {
 	} else {
 		buf.Myprintf("use")
 	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (node *Use) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *Use) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *Use) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *Use) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *Use) SetExtra(extra any) {
+	node.Auth.Extra = extra
 }
 
 func (node *Use) walkSubtree(visit Visit) error {
@@ -3973,8 +4382,8 @@ type FlushOption struct {
 
 // PurgeBinaryLogs represents a PURGE BINARY LOGS statement.
 type PurgeBinaryLogs struct {
-	To string
 	Before Expr
+	To     string
 }
 
 func (node *PurgeBinaryLogs) Format(buf *TrackedBuffer) {
@@ -3990,9 +4399,12 @@ func (node *PurgeBinaryLogs) Format(buf *TrackedBuffer) {
 
 // Flush represents a Flush statement.
 type Flush struct {
-	Type   string
 	Option *FlushOption
+	Type   string
+	Auth   AuthInformation
 }
+
+var _ AuthNode = (*Flush)(nil)
 
 // Format formats the node.
 func (node *Flush) Format(buf *TrackedBuffer) {
@@ -4022,13 +4434,40 @@ func (node *Flush) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (node *Flush) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *Flush) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *Flush) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *Flush) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *Flush) SetExtra(extra any) {
+	node.Auth.Extra = extra
+}
+
 // ChangeReplicationSource represents a "CHANGE REPLICATION SOURCE TO" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/change-replication-source-to.html
 type ChangeReplicationSource struct {
+	Auth    AuthInformation
 	Options []*ReplicationOption
 }
 
 var _ Statement = (*ChangeReplicationSource)(nil)
+var _ AuthNode = (*ChangeReplicationSource)(nil)
 
 func (*ChangeReplicationSource) iStatement() {}
 
@@ -4044,13 +4483,40 @@ func (s *ChangeReplicationSource) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (s *ChangeReplicationSource) GetAuthInformation() AuthInformation {
+	return s.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (s *ChangeReplicationSource) SetAuthType(authType string) {
+	s.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (s *ChangeReplicationSource) SetAuthTargetType(targetType string) {
+	s.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (s *ChangeReplicationSource) SetAuthTargetNames(targetNames []string) {
+	s.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (s *ChangeReplicationSource) SetExtra(extra any) {
+	s.Auth.Extra = extra
+}
+
 // ChangeReplicationFilter represents a "CHANGE REPLICATION FILTER" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/change-replication-filter.html
 type ChangeReplicationFilter struct {
+	Auth    AuthInformation
 	Options []*ReplicationOption
 }
 
 var _ Statement = (*ChangeReplicationFilter)(nil)
+var _ AuthNode = (*ChangeReplicationFilter)(nil)
 
 func (*ChangeReplicationFilter) iStatement() {}
 
@@ -4077,18 +4543,46 @@ func (c *ChangeReplicationFilter) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (c *ChangeReplicationFilter) GetAuthInformation() AuthInformation {
+	return c.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (c *ChangeReplicationFilter) SetAuthType(authType string) {
+	c.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (c *ChangeReplicationFilter) SetAuthTargetType(targetType string) {
+	c.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (c *ChangeReplicationFilter) SetAuthTargetNames(targetNames []string) {
+	c.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (c *ChangeReplicationFilter) SetExtra(extra any) {
+	c.Auth.Extra = extra
+}
+
 // ReplicationOption represents a single replication option name and value.
 // See https://dev.mysql.com/doc/refman/8.0/en/change-replication-source-to.html for available options.
 type ReplicationOption struct {
+	Value any
 	Name  string
-	Value interface{}
 }
 
 // StartReplica represents a "START REPLICA" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/start-replica.html
-type StartReplica struct{}
+type StartReplica struct {
+	Auth AuthInformation
+}
 
 var _ Statement = (*StartReplica)(nil)
+var _ AuthNode = (*StartReplica)(nil)
 
 func (*StartReplica) iStatement() {}
 
@@ -4096,11 +4590,39 @@ func (r *StartReplica) Format(buf *TrackedBuffer) {
 	buf.WriteString("start replica")
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (r *StartReplica) GetAuthInformation() AuthInformation {
+	return r.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (r *StartReplica) SetAuthType(authType string) {
+	r.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (r *StartReplica) SetAuthTargetType(targetType string) {
+	r.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (r *StartReplica) SetAuthTargetNames(targetNames []string) {
+	r.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (r *StartReplica) SetExtra(extra any) {
+	r.Auth.Extra = extra
+}
+
 // StopReplica represents a "STOP REPLICA" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/stop-replica.html
-type StopReplica struct{}
+type StopReplica struct {
+	Auth AuthInformation
+}
 
 var _ Statement = (*StopReplica)(nil)
+var _ AuthNode = (*StopReplica)(nil)
 
 func (*StopReplica) iStatement() {}
 
@@ -4108,13 +4630,40 @@ func (r *StopReplica) Format(buf *TrackedBuffer) {
 	buf.WriteString("stop replica")
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (r *StopReplica) GetAuthInformation() AuthInformation {
+	return r.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (r *StopReplica) SetAuthType(authType string) {
+	r.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (r *StopReplica) SetAuthTargetType(targetType string) {
+	r.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (r *StopReplica) SetAuthTargetNames(targetNames []string) {
+	r.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (r *StopReplica) SetExtra(extra any) {
+	r.Auth.Extra = extra
+}
+
 // ResetReplica represents a "RESET REPLICA" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/reset-replica.html
 type ResetReplica struct {
-	All bool
+	Auth AuthInformation
+	All  bool
 }
 
 var _ Statement = (*ResetReplica)(nil)
+var _ AuthNode = (*ResetReplica)(nil)
 
 func (*ResetReplica) iStatement() {}
 
@@ -4123,6 +4672,31 @@ func (r *ResetReplica) Format(buf *TrackedBuffer) {
 	if r.All {
 		buf.WriteString(" all")
 	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (r *ResetReplica) GetAuthInformation() AuthInformation {
+	return r.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (r *ResetReplica) SetAuthType(authType string) {
+	r.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (r *ResetReplica) SetAuthTargetType(targetType string) {
+	r.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (r *ResetReplica) SetAuthTargetNames(targetNames []string) {
+	r.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (r *ResetReplica) SetExtra(extra any) {
+	r.Auth.Extra = extra
 }
 
 // OtherRead represents a DESCRIBE, or EXPLAIN statement.
@@ -4214,9 +4788,9 @@ func (node *StarExpr) walkSubtree(visit Visit) error {
 type AliasedExpr struct {
 	Expr            Expr
 	As              ColIdent
+	InputExpression string
 	StartParsePos   int
 	EndParsePos     int
-	InputExpression string
 }
 
 // Format formats the node.
@@ -4227,8 +4801,8 @@ func (node *AliasedExpr) Format(buf *TrackedBuffer) {
 			// we use the alias expression for the column in the return schema.
 			buf.Myprintf("%v %v", node.Expr, node.As)
 		} else {
-			//buf.Myprintf("%s", node.InputExpression)
-			node.Expr.Format(buf)
+			// buf.Myprintf("%s", node.InputExpression)
+			buf.Myprintf("%v", node.Expr)
 		}
 	} else if !node.As.IsEmpty() {
 		buf.Myprintf("%v as %v", node.Expr, node.As)
@@ -4416,13 +4990,16 @@ func (TableFuncExpr) iTableExpr()     {}
 // coupled with an optional alias, AS OF expression, and index hints.
 // If As is empty, no alias was used.
 type AliasedTableExpr struct {
+	Auth       AuthInformation
 	Expr       SimpleTableExpr
-	Partitions Partitions
-	As         TableIdent
 	Hints      *IndexHints
 	AsOf       *AsOf
+	As         TableIdent
+	Partitions Partitions
 	Lateral    bool
 }
+
+var _ AuthNode = (*AliasedTableExpr)(nil)
 
 type AsOf struct {
 	Time           Expr
@@ -4496,6 +5073,31 @@ func (node *AliasedTableExpr) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (node *AliasedTableExpr) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *AliasedTableExpr) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *AliasedTableExpr) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *AliasedTableExpr) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *AliasedTableExpr) SetExtra(extra any) {
+	node.Auth.Extra = extra
+}
+
 func (node *AliasedTableExpr) walkSubtree(visit Visit) error {
 	if node == nil {
 		return nil
@@ -4517,7 +5119,7 @@ func (node *AliasedTableExpr) RemoveHints() *AliasedTableExpr {
 }
 
 type With struct {
-	Ctes      []TableExpr
+	Ctes      []*CommonTableExpr
 	Recursive bool
 }
 
@@ -4552,13 +5154,12 @@ func (w *With) walkSubtree(visit Visit) error {
 }
 
 type Into struct {
-	Variables Variables
+	Fields    *Fields
+	Lines     *Lines
 	Dumpfile  string
-
-	Outfile string
-	Charset string
-	Fields  *Fields
-	Lines   *Lines
+	Outfile   string
+	Charset   string
+	Variables Variables
 }
 
 func (i *Into) Format(buf *TrackedBuffer) {
@@ -4643,6 +5244,24 @@ func (node TableNames) Format(buf *TrackedBuffer) {
 		buf.Myprintf("%s%v", prefix, n)
 		prefix = ", "
 	}
+}
+
+// DbQualifiers returns the DbQualifier of each name.
+func (node TableNames) DbQualifiers() []string {
+	dbQualifiers := make([]string, len(node))
+	for i := range node {
+		dbQualifiers[i] = node[i].DbQualifier.String()
+	}
+	return dbQualifiers
+}
+
+// AuthMultipleTableIdentifiers returns a string slice in the format expected of AuthTargetType_MultipleTableIdentifiers.
+func (node TableNames) AuthMultipleTableIdentifiers() []string {
+	ret := make([]string, 0, len(node)*2)
+	for _, tableName := range node {
+		ret = append(ret, tableName.DbQualifier.String(), tableName.Name.String())
+	}
+	return ret
 }
 
 func (node TableNames) walkSubtree(visit Visit) error {
@@ -4750,7 +5369,7 @@ func (node EventName) IsEmpty() bool {
 // This means two TableName vars can be compared for equality
 // and a TableName can also be used as key in a map.
 // SchemaQualifier, if specified, represents a schema name, which is an additional level of namespace supported in
-// other dialects. Supported here so that this AST can act as a translation layer for those dialects, but is unused in 
+// other dialects. Supported here so that this AST can act as a translation layer for those dialects, but is unused in
 // MySQL.
 type TableName struct {
 	Name, DbQualifier, SchemaQualifier TableIdent
@@ -4793,7 +5412,7 @@ func (node TableName) IsEmpty() bool {
 }
 
 // ToViewName returns a TableName acceptable for use as a VIEW. VIEW names are
-// always lowercase, so ToViewName lowercasese the name. Databases are case-sensitive
+// always lowercase, so ToViewName lowercases the name. Databases are case-sensitive
 // so DbQualifier is left untouched.
 func (node TableName) ToViewName() TableName {
 	return TableName{
@@ -4909,6 +5528,7 @@ const (
 	NaturalJoinStr      = "natural join"
 	NaturalLeftJoinStr  = "natural left join"
 	NaturalRightJoinStr = "natural right join"
+	NaturalFullJoinStr  = "natural full join"
 	FullOuterJoinStr    = "full outer join"
 )
 
@@ -4967,8 +5587,8 @@ func (node *IndexHints) walkSubtree(visit Visit) error {
 
 // Where represents a WHERE or HAVING clause.
 type Where struct {
-	Type string
 	Expr Expr
+	Type string
 }
 
 // Where.Type
@@ -5224,9 +5844,10 @@ func (node *ParenExpr) replace(from, to Expr) bool {
 
 // ComparisonExpr represents a two-value comparison expression.
 type ComparisonExpr struct {
-	Operator    string
-	Left, Right Expr
-	Escape      Expr
+	Left     Expr
+	Right    Expr
+	Escape   Expr
+	Operator string
 }
 
 // ComparisonExpr.Operator
@@ -5300,9 +5921,10 @@ func (node *ComparisonExpr) IsImpossible() bool {
 
 // RangeCond represents a BETWEEN or a NOT BETWEEN expression.
 type RangeCond struct {
-	Operator string
 	Left     Expr
-	From, To Expr
+	From     Expr
+	To       Expr
+	Operator string
 }
 
 // RangeCond.Operator
@@ -5334,8 +5956,8 @@ func (node *RangeCond) replace(from, to Expr) bool {
 
 // IsExpr represents an IS ... or an IS NOT ... expression.
 type IsExpr struct {
-	Operator string
 	Expr     Expr
+	Operator string
 }
 
 // IsExpr.Operator
@@ -5438,8 +6060,8 @@ const (
 
 // SQLVal represents a single value.
 type SQLVal struct {
-	Type ValType
 	Val  []byte
+	Type ValType
 }
 
 // NewStrVal builds a new StrVal.
@@ -5550,13 +6172,9 @@ func (node BoolVal) replace(from, to Expr) bool {
 
 // ColName represents a column name.
 type ColName struct {
-	// Metadata is not populated by the parser.
-	// It's a placeholder for analyzers to store
-	// additional data, typically info about which
-	// table or column this node references.
-	Metadata  interface{}
-	Name      ColIdent
-	Qualifier TableName
+	StoredProcVal Expr
+	Qualifier     TableName
+	Name          ColIdent
 }
 
 // NewColName returns a simple ColName with no table qualifier
@@ -5682,8 +6300,9 @@ func (node ListArg) replace(from, to Expr) bool {
 
 // BinaryExpr represents a binary value expression.
 type BinaryExpr struct {
-	Operator    string
-	Left, Right Expr
+	Left     Expr
+	Right    Expr
+	Operator string
 }
 
 // BinaryExpr.Operator
@@ -5723,8 +6342,8 @@ func (node *BinaryExpr) replace(from, to Expr) bool {
 
 // UnaryExpr represents a unary value expression.
 type UnaryExpr struct {
-	Operator string
 	Expr     Expr
+	Operator string
 }
 
 // UnaryExpr.Operator
@@ -5827,9 +6446,9 @@ func (node *IntervalExpr) replace(from, to Expr) bool {
 
 // ExtractFuncExpr represents the function and arguments for EXTRACT(<time_unit> from <expr>) functions.
 type ExtractFuncExpr struct {
+	Expr Expr
 	Name string
 	Unit string
-	Expr Expr
 }
 
 // Format formats the node.
@@ -5915,11 +6534,12 @@ func (node *CollateExpr) replace(from, to Expr) bool {
 
 // FuncExpr represents a function call.
 type FuncExpr struct {
-	Qualifier TableIdent
-	Name      ColIdent
-	Distinct  bool
-	Exprs     SelectExprs
+	Auth      AuthInformation
 	Over      *Over
+	Name      ColIdent
+	Qualifier TableIdent
+	Exprs     SelectExprs
+	Distinct  bool
 }
 
 // Format formats the node.
@@ -6086,7 +6706,7 @@ type SubstrExpr struct {
 
 // Format formats the node.
 func (node *SubstrExpr) Format(buf *TrackedBuffer) {
-	var val interface{}
+	var val any
 	if node.Name != nil {
 		val = node.Name
 	} else {
@@ -6161,9 +6781,9 @@ func (node *TrimExpr) walkSubtree(visit Visit) error {
 // ConvertExpr represents a call to CONVERT(expr, type)
 // or its equivalent CAST(expr AS type). Both are rewritten to the former.
 type ConvertExpr struct {
-	Name string
 	Expr Expr
 	Type *ConvertType
+	Name string
 }
 
 // Format formats the node.
@@ -6217,8 +6837,8 @@ func (node *ConvertUsingExpr) replace(from, to Expr) bool {
 
 // CharExpr represents a call to CHAR(expr1, expr2, ... using charset)
 type CharExpr struct {
-	Exprs SelectExprs
 	Type  string
+	Exprs SelectExprs
 }
 
 // Format formats the node.
@@ -6273,9 +6893,9 @@ func (node *ConvertType) Format(buf *TrackedBuffer) {
 
 // MatchExpr represents a call to the MATCH function
 type MatchExpr struct {
-	Columns SelectExprs
 	Expr    Expr
 	Option  string
+	Columns SelectExprs
 }
 
 // MatchExpr.Option
@@ -6318,8 +6938,8 @@ func (node *MatchExpr) replace(from, to Expr) bool {
 // CaseExpr represents a CASE expression.
 type CaseExpr struct {
 	Expr  Expr
-	Whens []*When
 	Else  Expr
+	Whens []*When
 }
 
 // Format formats the node.
@@ -6491,8 +7111,8 @@ const (
 
 // Frame represents a window Frame clause.
 type Frame struct {
-	Unit   FrameUnit
 	Extent *FrameExtent
+	Unit   FrameUnit
 }
 
 // Format formats the node.
@@ -6599,13 +7219,14 @@ func (node *FrameBound) walkSubtree(visit Visit) error {
 
 // WindowDef represents a window clause definition
 type WindowDef struct {
+	Frame *Frame
 	// Name is used in WINDOW clauses
 	Name ColIdent
 	// NameRef is used in OVER clauses
-	NameRef     ColIdent
+	NameRef ColIdent
+
 	PartitionBy Exprs
 	OrderBy     OrderBy
-	Frame       *Frame
 }
 
 // Format formats the node.
@@ -6680,7 +7301,9 @@ func (node *Limit) Format(buf *TrackedBuffer) {
 	if node.Offset != nil {
 		buf.Myprintf("%v, ", node.Offset)
 	}
-	buf.Myprintf("%v", node.Rowcount)
+	if node.Rowcount != nil {
+		buf.Myprintf("%v", node.Rowcount)
+	}
 }
 
 func (node *Limit) walkSubtree(visit Visit) error {
@@ -6845,6 +7468,22 @@ func VarScopeForColName(colName *ColName) (*ColName, SetScope, string, error) {
 	}
 }
 
+func isUserVar(part string) bool {
+	return len(part) >= 2 && part[0] == '@' && part[1] != '@'
+}
+
+// hasValidVarParts checks that `@`, `'`, and `"` does not prefix any name part
+func hasValidVarParts(parts ...string) bool {
+	for _, part := range parts {
+		if strings.HasPrefix(part, `@`) ||
+			strings.HasPrefix(part, `'`) ||
+			strings.HasPrefix(part, `"`) {
+			return false
+		}
+	}
+	return true
+}
+
 // VarScope returns the SetScope of the given name, broken into parts. For example, `@@GLOBAL.sys_var` would become
 // `[]string{"@@GLOBAL", "sys_var"}`. Returns the variable name without any scope specifiers, so the aforementioned
 // variable would simply return "sys_var". `[]string{"@@other_var"}` would return "other_var". If a scope is not
@@ -6860,63 +7499,51 @@ func VarScope(nameParts ...string) (string, SetScope, string, error) {
 		// First case covers `@@@`, `@@@@`, etc.
 		if strings.HasPrefix(nameParts[0], "@@@") {
 			return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[0])
-		} else if strings.HasPrefix(nameParts[0], "@@") {
+		}
+		if strings.HasPrefix(nameParts[0], "@@") {
 			dotIdx := strings.Index(nameParts[0], ".")
 			if dotIdx != -1 {
 				return VarScope(nameParts[0][:dotIdx], nameParts[0][dotIdx+1:])
 			}
 			// Session scope is inferred here, but not explicitly requested
 			return trimQuotes(nameParts[0][2:]), SetScope_Session, "", nil
-		} else if strings.HasPrefix(nameParts[0], "@") {
+		}
+		if strings.HasPrefix(nameParts[0], "@") {
 			varName := nameParts[0][1:]
 			if len(varName) > 0 {
 				varName = trimQuotes(varName)
 			}
 			return varName, SetScope_User, "", nil
-		} else {
-			return nameParts[0], SetScope_None, "", nil
 		}
+		return nameParts[0], SetScope_None, "", nil
 	case 2:
 		// `@user.var` is valid, so we check for it here.
-		if len(nameParts[0]) >= 2  &&
-			nameParts[0][0] == '@' &&
-			nameParts[0][1] != '@' &&
-			!strings.HasPrefix(nameParts[1], "@") { // `@user.@var` is invalid though.
+		if isUserVar(nameParts[0]) {
+			if !hasValidVarParts(nameParts[1]) {
+				// Last value is column name, so we return that in the error
+				return "", SetScope_None, "", fmt.Errorf("invalid user variable declaration `%s`", nameParts[1])
+			}
+			// Last value is column name, so we return that in the error
 			return fmt.Sprintf("%s.%s", nameParts[0][1:], nameParts[1]), SetScope_User, "", nil
 		}
-		// We don't support variables such as `@@validate_password.length` right now, only `@@GLOBAL.sys_var`, etc.
-		// The `@` symbols are only valid on the first name_part. First case also catches `@@@`, etc.
-		if strings.HasPrefix(nameParts[1], "@@") {
+		if !hasValidVarParts(nameParts[1]) {
+			// Last value is column name, so we return that in the error
 			return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
-		} else if strings.HasPrefix(nameParts[1], "@") {
-			return "", SetScope_None, "", fmt.Errorf("invalid user variable declaration `%s`", nameParts[1])
 		}
+		var setScope SetScope
 		switch strings.ToLower(nameParts[0]) {
 		case "@@global":
-			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
-				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
-			}
-			return trimQuotes(nameParts[1]), SetScope_Global, nameParts[0][2:], nil
+			setScope = SetScope_Global
 		case "@@persist":
-			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
-				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
-			}
-			return trimQuotes(nameParts[1]), SetScope_Persist, nameParts[0][2:], nil
+			setScope = SetScope_Persist
 		case "@@persist_only":
-			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
-				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
-			}
-			return trimQuotes(nameParts[1]), SetScope_PersistOnly, nameParts[0][2:], nil
+			setScope = SetScope_PersistOnly
 		case "@@session":
-			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
-				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
-			}
-			return trimQuotes(nameParts[1]), SetScope_Session, nameParts[0][2:], nil
+			setScope = SetScope_Session
 		case "@@local":
-			if strings.HasPrefix(nameParts[1], `"`) || strings.HasPrefix(nameParts[1], `'`) {
-				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[1])
-			}
-			return trimQuotes(nameParts[1]), SetScope_Session, nameParts[0][2:], nil
+			setScope = SetScope_Session
+		case "@@validate_password":
+			return trimQuotes(fmt.Sprintf("%s.%s", nameParts[0][2:], nameParts[1])), SetScope_Global, "global", nil
 		default:
 			// This catches `@@@GLOBAL.sys_var`. Due to the earlier check, this does not error on `@user.var`.
 			if strings.HasPrefix(nameParts[0], "@") {
@@ -6925,25 +7552,36 @@ func VarScope(nameParts ...string) (string, SetScope, string, error) {
 			}
 			return nameParts[1], SetScope_None, "", nil
 		}
-	default:
+		return trimQuotes(nameParts[1]), setScope, nameParts[0][2:], nil
+	case 3:
 		// `@user.var.name` is valid, so we check for it here.
-		if len(nameParts[0]) >= 2 && nameParts[0][0] == '@' && nameParts[0][1] != '@' {
-			// `@` may only appear in the first name part for user variables
-			for i := 1; i < len(nameParts); i++ {
-				if strings.HasPrefix(nameParts[i], "@") {
-					// Last value is column name, so we return that in the error
-					return "", SetScope_None, "", fmt.Errorf("invalid user variable declaration `%s`", nameParts[len(nameParts)-1])
-				}
+		if isUserVar(nameParts[0]) {
+			if !hasValidVarParts(nameParts[1:]...) {
+				// Last value is column name, so we return that in the error
+				return "", SetScope_None, "", fmt.Errorf("invalid user variable declaration `%s`", nameParts[len(nameParts)-1])
+			}
+			return fmt.Sprintf("%s.%s.%s", nameParts[0][1:], nameParts[1], nameParts[2]), SetScope_User, "", nil
+		}
+		if !hasValidVarParts(nameParts[1:]...) {
+			// Last value is column name, so we return that in the error
+			return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[len(nameParts)-1])
+		}
+		if strings.EqualFold(nameParts[0], "@@global") && strings.EqualFold(nameParts[1], "validate_password") {
+			return trimQuotes(fmt.Sprintf("%s.%s", nameParts[1], nameParts[2])), SetScope_Global, "global", nil
+		}
+		return nameParts[len(nameParts)-1], SetScope_None, "", nil
+	default:
+		// `@user.var.name.xyz...` is valid, so we check for it here.
+		if isUserVar(nameParts[0]) {
+			if !hasValidVarParts(nameParts[1:]...) {
+				// Last value is column name, so we return that in the error
+				return "", SetScope_None, "", fmt.Errorf("invalid user variable declaration `%s`", nameParts[len(nameParts)-1])
 			}
 			return strings.Join(append([]string{nameParts[0][1:]}, nameParts[1:]...), "."), SetScope_User, "", nil
 		}
-		// As we don't support `@@GLOBAL.validate_password.length` or anything potentially longer, we error if any part
-		// starts with either `@@` or `@`. We can just check for `@` though.
-		for _, namePart := range nameParts {
-			if strings.HasPrefix(namePart, "@") {
-				// Last value is column name, so we return that in the error
-				return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[len(nameParts)-1])
-			}
+		if !hasValidVarParts(nameParts[1:]...) {
+			// Last value is column name, so we return that in the error
+			return "", SetScope_None, "", fmt.Errorf("invalid system variable declaration `%s`", nameParts[len(nameParts)-1])
 		}
 		return nameParts[len(nameParts)-1], SetScope_None, "", nil
 	}
@@ -6951,9 +7589,9 @@ func VarScope(nameParts ...string) (string, SetScope, string, error) {
 
 // SetVarExpr represents a set expression.
 type SetVarExpr struct {
-	Scope SetScope
-	Name  *ColName
 	Expr  Expr
+	Name  *ColName
+	Scope SetScope
 }
 
 // SetVarExpr.Expr, for SET TRANSACTION ... or START TRANSACTION
@@ -7134,8 +7772,8 @@ func (node *ColIdent) UnmarshalJSON(b []byte) error {
 
 type TableFuncExpr struct {
 	Name  string
-	Exprs SelectExprs
 	Alias TableIdent
+	Exprs SelectExprs
 }
 
 // Format formats the node.
@@ -7291,8 +7929,8 @@ const (
 // TableAndLockType contains table and lock association
 type TableAndLockType struct {
 	Table TableExpr
-	Lock  LockType
 	SQLNode
+	Lock LockType
 }
 
 func (node *TableAndLockType) Format(buf *TrackedBuffer) {
@@ -7313,8 +7951,8 @@ type TableAndLockTypes []*TableAndLockType
 
 // LockTables represents the lock statement
 type LockTables struct {
-	Tables TableAndLockTypes
 	SQLNode
+	Tables TableAndLockTypes
 }
 
 func (node *LockTables) Format(buf *TrackedBuffer) {
@@ -7359,9 +7997,12 @@ func (node *UnlockTables) walkSubtree(visit Visit) error {
 }
 
 type Kill struct {
-	Connection bool
 	ConnID     Expr
+	Auth       AuthInformation
+	Connection bool
 }
+
+var _ AuthNode = (*Kill)(nil)
 
 func (k *Kill) Format(buf *TrackedBuffer) {
 	buf.WriteString("kill ")
@@ -7371,6 +8012,31 @@ func (k *Kill) Format(buf *TrackedBuffer) {
 		buf.WriteString("query ")
 	}
 	buf.Myprintf("%v", k.ConnID)
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (k *Kill) GetAuthInformation() AuthInformation {
+	return k.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (k *Kill) SetAuthType(authType string) {
+	k.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (k *Kill) SetAuthTargetType(targetType string) {
+	k.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (k *Kill) SetAuthTargetNames(targetNames []string) {
+	k.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (k *Kill) SetExtra(extra any) {
+	k.Auth.Extra = extra
 }
 
 func (*Kill) iStatement() {}
@@ -7397,12 +8063,10 @@ func compliantName(in string) string {
 }
 
 type Analyze struct {
-	Tables TableNames
-	// UPDATE or DELETE
+	Using   Expr
 	Action  string
+	Tables  TableNames
 	Columns Columns
-	// JSON data for stats
-	Using Expr
 }
 
 func (*Analyze) iStatement() {}
@@ -7480,10 +8144,13 @@ func (node *Deallocate) Format(buf *TrackedBuffer) {
 
 type CreateSpatialRefSys struct {
 	SRID        *SQLVal
+	SrsAttr     *SrsAttribute
+	Auth        AuthInformation
 	OrReplace   bool
 	IfNotExists bool
-	SrsAttr     *SrsAttribute
 }
+
+var _ AuthNode = (*CreateSpatialRefSys)(nil)
 
 func (*CreateSpatialRefSys) iStatement() {}
 
@@ -7502,6 +8169,31 @@ func (node *CreateSpatialRefSys) Format(buf *TrackedBuffer) {
 	}
 	buf.Myprintf("%v\n", node.SRID)
 	buf.Myprintf("%v", node.SrsAttr)
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (node *CreateSpatialRefSys) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (node *CreateSpatialRefSys) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (node *CreateSpatialRefSys) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (node *CreateSpatialRefSys) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (node *CreateSpatialRefSys) SetExtra(extra any) {
+	node.Auth.Extra = extra
 }
 
 type SrsAttribute struct {
@@ -7527,17 +8219,27 @@ func (node *SrsAttribute) Format(buf *TrackedBuffer) {
 
 // Injectable is an expression that can accept a set of analyzed/resolved children. Used within InjectedExpr.
 type Injectable interface {
-	WithResolvedChildren(children []any) (any, error)
+	WithResolvedChildren(ctx context.Context, children []any) (any, error)
 }
 
 // InjectedExpr allows bypassing AST analysis. This is used by projects that rely on Vitess, but may not implement
 // MySQL's dialect.
 type InjectedExpr struct {
+	// Auth contains the authentication information for the expression.
+	Auth AuthInformation
+	// Expression is an expression that implements the Expr interface. It can be any expression type.
 	Expression Injectable
-	Children   Exprs
+	// Children are the children of the expression, which can be any Expr type. This is a union type, and either this
+	// or SelectExprChildren will be set.
+	Children Exprs
+	// SelectExprChildren are the children of the expression, which can be any SelectExpr type. This is a union type,
+	// and either this or Children will be set.
+	SelectExprChildren SelectExprs
 }
 
 var _ Expr = InjectedExpr{}
+var _ AuthNode = InjectedExpr{}
+var _ WalkableSQLNode = InjectedExpr{}
 
 // iExpr implements the Expr interface.
 func (d InjectedExpr) iExpr() {}
@@ -7556,14 +8258,58 @@ func (d InjectedExpr) Format(buf *TrackedBuffer) {
 	}
 }
 
+// GetAuthInformation implements the AuthNode interface.
+func (d InjectedExpr) GetAuthInformation() AuthInformation {
+	return d.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (d InjectedExpr) SetAuthType(authType string) {
+	d.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (d InjectedExpr) SetAuthTargetType(targetType string) {
+	d.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (d InjectedExpr) SetAuthTargetNames(targetNames []string) {
+	d.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (d InjectedExpr) SetExtra(extra any) {
+	d.Auth.Extra = extra
+}
+
+func (d InjectedExpr) walkSubtree(visit Visit) error {
+	for _, child := range d.Children {
+		err := Walk(visit, child)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// OrderedInjectedExpr is an InjectedExpr that has an OrderBy clause associated with it
+type OrderedInjectedExpr struct {
+	InjectedExpr
+	OrderBy OrderBy
+}
+
 // InjectedStatement allows bypassing AST analysis. This is used by projects that rely on Vitess, but may not implement
 // MySQL's dialect.
 type InjectedStatement struct {
-	Statement  Injectable
-	Children   Exprs
+	Auth      AuthInformation
+	Statement Injectable
+	Children  Exprs
 }
 
 var _ Statement = InjectedStatement{}
+var _ AuthNode = InjectedStatement{}
 
 // iStatement implements the Statement interface.
 func (d InjectedStatement) iStatement() {}
@@ -7575,4 +8321,67 @@ func (d InjectedStatement) Format(buf *TrackedBuffer) {
 	} else {
 		buf.WriteString("InjectedStatement")
 	}
+}
+
+// GetAuthInformation implements the AuthNode interface.
+func (d InjectedStatement) GetAuthInformation() AuthInformation {
+	return d.Auth
+}
+
+// SetAuthType implements the AuthNode interface.
+func (d InjectedStatement) SetAuthType(authType string) {
+	d.Auth.AuthType = authType
+}
+
+// SetAuthTargetType implements the AuthNode interface.
+func (d InjectedStatement) SetAuthTargetType(targetType string) {
+	d.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames implements the AuthNode interface.
+func (d InjectedStatement) SetAuthTargetNames(targetNames []string) {
+	d.Auth.TargetNames = targetNames
+}
+
+// SetExtra implements the AuthNode interface.
+func (d InjectedStatement) SetExtra(extra any) {
+	d.Auth.Extra = extra
+}
+
+// Binlog represents a BINLOG statement that executes base64-encoded binary log events.
+type Binlog struct {
+	Base64Str string
+	Auth      AuthInformation
+}
+
+var _ AuthNode = (*Binlog)(nil)
+
+// Format formats the node.
+func (node *Binlog) Format(buf *TrackedBuffer) {
+	buf.Myprintf("binlog '%s'", node.Base64Str)
+}
+
+// GetAuthInformation returns the authorization information for this node.
+func (node *Binlog) GetAuthInformation() AuthInformation {
+	return node.Auth
+}
+
+// SetAuthType sets the authorization type.
+func (node *Binlog) SetAuthType(authType string) {
+	node.Auth.AuthType = authType
+}
+
+// SetAuthTargetType sets the authorization target type.
+func (node *Binlog) SetAuthTargetType(targetType string) {
+	node.Auth.TargetType = targetType
+}
+
+// SetAuthTargetNames sets the authorization target names.
+func (node *Binlog) SetAuthTargetNames(targetNames []string) {
+	node.Auth.TargetNames = targetNames
+}
+
+// SetExtra sets extra authorization information.
+func (node *Binlog) SetExtra(extra any) {
+	node.Auth.Extra = extra
 }

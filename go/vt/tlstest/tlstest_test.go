@@ -100,15 +100,13 @@ func testClientServer(t *testing.T, combineCerts bool) {
 	// Positive case: accept on server side, connect a client, send data.
 	//
 	var clientErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		clientConn, clientErr := tls.DialWithDialer(dialer, "tcp", addr, clientConfig)
 		if clientErr == nil {
 			_, _ = clientConn.Write([]byte{42})
 			clientConn.Close()
 		}
-	}()
+	})
 
 	serverConn, err := listener.Accept()
 	if err != nil {
@@ -148,10 +146,8 @@ func testClientServer(t *testing.T, combineCerts bool) {
 	}
 
 	var serverErr error
-	wg.Add(1)
-	go func() {
+	wg.Go(func() {
 		// We expect the Accept to work, but the first read to fail.
-		defer wg.Done()
 		serverConn, serverErr := listener.Accept()
 		// This will fail.
 		if serverErr == nil {
@@ -161,7 +157,7 @@ func testClientServer(t *testing.T, combineCerts bool) {
 			}
 			serverConn.Close()
 		}
-	}()
+	})
 
 	// When using TLS 1.2, the Dial will fail.
 	// With TLS 1.3, the Dial will succeed and the first Read will fail.
@@ -336,15 +332,13 @@ func assertTLSHandshakeFails(t *testing.T, serverConfig, clientConfig *tls.Confi
 	wg := sync.WaitGroup{}
 
 	var clientErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		var clientConn *tls.Conn
 		clientConn, clientErr = tls.DialWithDialer(dialer, "tcp", addr, clientConfig)
 		if clientErr == nil {
 			clientConn.Close()
 		}
-	}()
+	})
 
 	serverConn, err := listener.Accept()
 	if err != nil {

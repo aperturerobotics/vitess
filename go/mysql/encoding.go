@@ -137,7 +137,7 @@ func writeLenEncString(data []byte, pos int, value string) int {
 }
 
 func writeZeroes(data []byte, pos int, len int) int {
-	for i := 0; i < len; i++ {
+	for i := range len {
 		data[pos+i] = 0
 	}
 	return pos + len

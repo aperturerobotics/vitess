@@ -18,14 +18,13 @@ limitations under the License.
 package sqltypes
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
 
 	"github.com/dolthub/vitess/go/bytes2"
-	"github.com/dolthub/vitess/go/hack"
-
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
 )
 
@@ -157,7 +156,7 @@ func NewIntegral(val string) (n Value, err error) {
 // string and []byte.
 // This function is deprecated. Use the type-specific
 // functions instead.
-func InterfaceToValue(goval interface{}) (Value, error) {
+func InterfaceToValue(goval any) (Value, error) {
 	switch goval := goval.(type) {
 	case nil:
 		return NULL, nil
@@ -209,7 +208,7 @@ func (v Value) ToString() string {
 	if v.typ == Expression {
 		return ""
 	}
-	return hack.String(v.val)
+	return string(v.val)
 }
 
 // String returns a printable version of the value.
@@ -220,7 +219,7 @@ func (v Value) String() string {
 	if v.IsQuoted() || v.typ == Bit {
 		return fmt.Sprintf("%v(%q)", v.typ, v.val)
 	}
-	return fmt.Sprintf("%v(%s)", v.typ, v.val)
+	return fmt.Sprintf("%v(%s)", v.typ, bytes.Clone(v.val))
 }
 
 // EncodeSQL encodes the value into an SQL statement. Can be binary.
@@ -307,7 +306,7 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 	if len(b) == 0 {
 		return fmt.Errorf("error unmarshaling empty bytes")
 	}
-	var val interface{}
+	var val any
 	var err error
 	switch b[0] {
 	case '-':

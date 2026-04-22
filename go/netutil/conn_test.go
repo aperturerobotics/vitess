@@ -33,26 +33,22 @@ func createSocketPair(t *testing.T) (net.Listener, net.Conn, net.Conn) {
 	wg := sync.WaitGroup{}
 
 	var clientConn net.Conn
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		var err error
 		clientConn, err = net.Dial("tcp", addr)
 		if err != nil {
 			t.Errorf("Dial failed: %v", err)
 		}
-	}()
+	})
 
 	var serverConn net.Conn
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		var err error
 		serverConn, err = listener.Accept()
 		if err != nil {
 			t.Errorf("Accept failed: %v", err)
 		}
-	}()
+	})
 
 	wg.Wait()
 

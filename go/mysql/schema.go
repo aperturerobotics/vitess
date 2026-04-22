@@ -108,17 +108,20 @@ var DescribeTableFields = []*querypb.Field{
 // DescribeTableRow returns a row for a 'describe table' command.
 // 'name' is the name of the field.
 // 'type' is the type of the field. Something like:
-//   'int(11)' for 'int'
-//   'int(10) unsigned' for 'int unsigned'
-//   'bigint(20)' for 'bigint'
-//   'bigint(20) unsigned' for 'bigint unsigned'
-//   'varchar(128)'
+//
+//	'int(11)' for 'int'
+//	'int(10) unsigned' for 'int unsigned'
+//	'bigint(20)' for 'bigint'
+//	'bigint(20) unsigned' for 'bigint unsigned'
+//	'varchar(128)'
+//
 // 'null' is true if the field can be NULL.
 // 'key' is either:
-//    - 'PRI' if part of the primary key. If not:
-//    - 'UNI' if part of a unique index. If not:
-//    - 'MUL' if part of a non-unique index. If not:
-//    - empty if part of no key / index.
+//   - 'PRI' if part of the primary key. If not:
+//   - 'UNI' if part of a unique index. If not:
+//   - 'MUL' if part of a non-unique index. If not:
+//   - empty if part of no key / index.
+//
 // 'def' is the default value for the field. Empty if NULL default.
 func DescribeTableRow(name string, typ string, null bool, key string, def string) []sqltypes.Value {
 	nullStr := "NO"
@@ -306,7 +309,7 @@ func ShowIndexFromTableRow(table string, unique bool, keyName string, seqInIndex
 		sqltypes.MakeTrusted(sqltypes.VarChar, []byte(table)),
 		sqltypes.MakeTrusted(sqltypes.Int64, []byte(nonUnique)),
 		sqltypes.MakeTrusted(sqltypes.VarChar, []byte(keyName)),
-		sqltypes.MakeTrusted(sqltypes.Int64, []byte(fmt.Sprintf("%v", seqInIndex))),
+		sqltypes.MakeTrusted(sqltypes.Int64, fmt.Appendf(nil, "%v", seqInIndex)),
 		sqltypes.MakeTrusted(sqltypes.VarChar, []byte(columnName)),
 		sqltypes.MakeTrusted(sqltypes.VarChar, []byte("A")), // Collation
 		sqltypes.MakeTrusted(sqltypes.Int64, []byte("0")),   // Cardinality

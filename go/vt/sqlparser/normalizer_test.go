@@ -105,7 +105,7 @@ func TestNormalize(t *testing.T) {
 		outstmt: "update a set v1 = :bv1 where v2 in ::bv2",
 		outbv: map[string]*querypb.BindVariable{
 			"bv1": sqltypes.Int64BindVariable(5),
-			"bv2": sqltypes.TestBindVariable([]interface{}{1, 4, 5}),
+			"bv2": sqltypes.TestBindVariable([]any{1, 4, 5}),
 		},
 	}, {
 		// Hex value does not convert
@@ -142,15 +142,15 @@ func TestNormalize(t *testing.T) {
 		in:      fmt.Sprintf("select * from t where v1 = '%256s' and v2 = '%256s'", "a", "a"),
 		outstmt: "select * from t where v1 = :bv1 and v2 = :bv1",
 		outbv: map[string]*querypb.BindVariable{
-			"bv1": sqltypes.BytesBindVariable([]byte(fmt.Sprintf("%256s", "a"))),
+			"bv1": sqltypes.BytesBindVariable(fmt.Appendf(nil, "%256s", "a")),
 		},
 	}, {
 		// Values greater than len 256 will not reuse.
 		in:      fmt.Sprintf("select * from t where v1 = '%257s' and v2 = '%257s'", "b", "b"),
 		outstmt: "select * from t where v1 = :bv1 and v2 = :bv2",
 		outbv: map[string]*querypb.BindVariable{
-			"bv1": sqltypes.BytesBindVariable([]byte(fmt.Sprintf("%257s", "b"))),
-			"bv2": sqltypes.BytesBindVariable([]byte(fmt.Sprintf("%257s", "b"))),
+			"bv1": sqltypes.BytesBindVariable(fmt.Appendf(nil, "%257s", "b")),
+			"bv2": sqltypes.BytesBindVariable(fmt.Appendf(nil, "%257s", "b")),
 		},
 	}, {
 		// bad int
@@ -179,14 +179,14 @@ func TestNormalize(t *testing.T) {
 		in:      "select * from t where v1 in (1, '2')",
 		outstmt: "select * from t where v1 in ::bv1",
 		outbv: map[string]*querypb.BindVariable{
-			"bv1": sqltypes.TestBindVariable([]interface{}{1, []byte("2")}),
+			"bv1": sqltypes.TestBindVariable([]any{1, []byte("2")}),
 		},
 	}, {
 		// NOT IN clause
 		in:      "select * from t where v1 not in (1, '2')",
 		outstmt: "select * from t where v1 not in ::bv1",
 		outbv: map[string]*querypb.BindVariable{
-			"bv1": sqltypes.TestBindVariable([]interface{}{1, []byte("2")}),
+			"bv1": sqltypes.TestBindVariable([]any{1, []byte("2")}),
 		},
 	}}
 	for _, tc := range testcases {

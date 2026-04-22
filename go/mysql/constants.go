@@ -30,20 +30,24 @@ const (
 	protocolVersion = 10
 )
 
+// AuthMethodDescription is the type for different supported and
+// implemented authentication methods.
+type AuthMethodDescription string
+
 // Supported auth forms.
 const (
 	// MysqlNativePassword uses a salt and transmits a hash on the wire.
-	MysqlNativePassword = "mysql_native_password"
+	MysqlNativePassword = AuthMethodDescription("mysql_native_password")
 
 	// MysqlClearPassword transmits the password in the clear.
-	MysqlClearPassword = "mysql_clear_password"
+	MysqlClearPassword = AuthMethodDescription("mysql_clear_password")
 
 	// CachingSha2Password uses a salt and transmits a SHA256 hash on the wire.
-	CachingSha2Password = "caching_sha2_password"
+	CachingSha2Password = AuthMethodDescription("caching_sha2_password")
 
 	// MysqlDialog uses the dialog plugin on the client side.
 	// It transmits data in the clear.
-	MysqlDialog = "dialog"
+	MysqlDialog = AuthMethodDescription("dialog")
 )
 
 // Capability flags.
@@ -164,12 +168,13 @@ const (
 )
 
 // Cursor Types. They are received on COM_STMT_EXECUTE()
-// See https://mariadb.com/kb/en/com_stmt_execute/
+// See https://dev.mysql.com/doc/dev/mysql-server/9.3.0/mysql__com_8h.html#a3e5e9e744ff6f7b989a604fd669977da
 const (
-	NoCursor = iota
-	ReadOnly
-	CursorForUpdate
-	ScrollableCursor
+	NoCursor                uint8 = 0x00
+	ReadOnly                uint8 = 0x01
+	ForUpdate               uint8 = 0x02
+	Scrollable              uint8 = 0x04
+	ParameterCountAvailable uint8 = 0x08
 )
 
 // State Change Information
@@ -433,122 +438,126 @@ const (
 	ERLockDeadlock       = 1213
 
 	// invalid arg
-	ERUnknownComError              = 1047
-	ERBadNullError                 = 1048
-	ERBadDb                        = 1049
-	ERBadTable                     = 1051
-	ERNonUniq                      = 1052
-	ERWrongFieldWithGroup          = 1055
-	ERWrongGroupField              = 1056
-	ERWrongSumSelect               = 1057
-	ERWrongValueCount              = 1058
-	ERTooLongIdent                 = 1059
-	ERDupFieldName                 = 1060
-	ERDupKeyName                   = 1061
-	ERWrongFieldSpec               = 1063
-	ERParseError                   = 1064
-	EREmptyQuery                   = 1065
-	ERNonUniqTable                 = 1066
-	ERInvalidDefault               = 1067
-	ERMultiplePriKey               = 1068
-	ERTooManyKeys                  = 1069
-	ERTooManyKeyParts              = 1070
-	ERTooLongKey                   = 1071
-	ERKeyColumnDoesNotExist        = 1072
-	ERBlobUsedAsKey                = 1073
-	ERTooBigFieldLength            = 1074
-	ERWrongAutoKey                 = 1075
-	ERWrongFieldTerminators        = 1083
-	ERBlobsAndNoTerminated         = 1084
-	ERTextFileNotReadable          = 1085
-	ERWrongSubKey                  = 1089
-	ERCantRemoveAllFields          = 1090
-	ERUpdateTableUsed              = 1093
-	ERNoTablesUsed                 = 1096
-	ERTooBigSet                    = 1097
-	ERBlobCantHaveDefault          = 1101
-	ERWrongDbName                  = 1102
-	ERWrongTableName               = 1103
-	ERUnknownProcedure             = 1106
-	ERWrongParamCountToProcedure   = 1107
-	ERWrongParametersToProcedure   = 1108
-	ERFieldSpecifiedTwice          = 1110
-	ERInvalidGroupFuncUse          = 1111
-	ERTableMustHaveColumns         = 1113
-	ERUnknownCharacterSet          = 1115
-	ERTooManyTables                = 1116
-	ERTooManyFields                = 1117
-	ERTooBigRowSize                = 1118
-	ERWrongOuterJoin               = 1120
-	ERNullColumnInIndex            = 1121
-	ERFunctionNotDefined           = 1128
-	ERWrongValueCountOnRow         = 1136
-	ERInvalidUseOfNull             = 1138
-	ERRegexpError                  = 1139
-	ERMixOfGroupFuncAndFields      = 1140
-	ERIllegalGrantForTable         = 1144
-	ERSyntaxError                  = 1149
-	ERWrongColumnName              = 1166
-	ERWrongKeyColumn               = 1167
-	ERBlobKeyWithoutLength         = 1170
-	ERPrimaryCantHaveNull          = 1171
-	ERTooManyRows                  = 1172
-	ERLockOrActiveTransaction      = 1192
-	ERUnknownSystemVariable        = 1193
-	ERSetConstantsOnly             = 1204
-	ERWrongArguments               = 1210
-	ERWrongUsage                   = 1221
-	ERWrongNumberOfColumnsInSelect = 1222
-	ERDupArgument                  = 1225
-	ERLocalVariable                = 1228
-	ERGlobalVariable               = 1229
-	ERWrongValueForVar             = 1231
-	ERWrongTypeForVar              = 1232
-	ERVarCantBeRead                = 1233
-	ERCantUseOptionHere            = 1234
-	ERIncorrectGlobalLocalVar      = 1238
-	ERWrongFKDef                   = 1239
-	ERKeyRefDoNotMatchTableRef     = 1240
-	ERCyclicReference              = 1245
-	ERIllegalReference             = 1247
-	ERDerivedMustHaveAlias         = 1248
-	ERTableNameNotAllowedHere      = 1250
-	ERCollationCharsetMismatch     = 1253
-	ERWarnDataTruncated            = 1265
-	ERCantAggregate2Collations     = 1267
-	ERCantAggregate3Collations     = 1270
-	ERCantAggregateNCollations     = 1271
-	ERVariableIsNotStruct          = 1272
-	ERUnknownCollation             = 1273
-	ERWrongNameForIndex            = 1280
-	ERWrongNameForCatalog          = 1281
-	ERBadFTColumn                  = 1283
-	ERTruncatedWrongValue          = 1292
-	ERTooMuchAutoTimestampCols     = 1293
-	ERInvalidOnUpdate              = 1294
-	ERUnknownTimeZone              = 1298
-	ERInvalidCharacterString       = 1300
-	ERQueryInterrupted             = 1317
-	ERTruncatedWrongValueForField  = 1366
-	ERIllegalValueForType          = 1367
-	ERDataTooLong                  = 1406
-	ErrWrongValueForType           = 1411
-	ERForbidSchemaChange           = 1450
-	ERWrongValue                   = 1525
-	ERDataOutOfRange               = 1690
-	ERInvalidJSONText              = 3140
-	ERInvalidJSONTextInParams      = 3141
-	ERInvalidJSONBinaryData        = 3142
-	ERInvalidJSONCharset           = 3144
-	ERInvalidCastToJSON            = 3147
-	ERJSONValueTooBig              = 3150
-	ERJSONDocumentTooDeep          = 3157
+	ERUnknownComError                               = 1047
+	ERBadNullError                                  = 1048
+	ERBadDb                                         = 1049
+	ERBadTable                                      = 1051
+	ERNonUniq                                       = 1052
+	ERWrongFieldWithGroup                           = 1055
+	ERWrongGroupField                               = 1056
+	ERWrongSumSelect                                = 1057
+	ERWrongValueCount                               = 1058
+	ERTooLongIdent                                  = 1059
+	ERDupFieldName                                  = 1060
+	ERDupKeyName                                    = 1061
+	ERWrongFieldSpec                                = 1063
+	ERParseError                                    = 1064
+	EREmptyQuery                                    = 1065
+	ERNonUniqTable                                  = 1066
+	ERInvalidDefault                                = 1067
+	ERMultiplePriKey                                = 1068
+	ERTooManyKeys                                   = 1069
+	ERTooManyKeyParts                               = 1070
+	ERTooLongKey                                    = 1071
+	ERKeyColumnDoesNotExist                         = 1072
+	ERBlobUsedAsKey                                 = 1073
+	ERTooBigFieldLength                             = 1074
+	ERWrongAutoKey                                  = 1075
+	ERWrongFieldTerminators                         = 1083
+	ERBlobsAndNoTerminated                          = 1084
+	ERTextFileNotReadable                           = 1085
+	ERWrongSubKey                                   = 1089
+	ERCantRemoveAllFields                           = 1090
+	ERUpdateTableUsed                               = 1093
+	ERNoTablesUsed                                  = 1096
+	ERTooBigSet                                     = 1097
+	ERBlobCantHaveDefault                           = 1101
+	ERWrongDbName                                   = 1102
+	ERWrongTableName                                = 1103
+	ERUnknownProcedure                              = 1106
+	ERWrongParamCountToProcedure                    = 1107
+	ERWrongParametersToProcedure                    = 1108
+	ERFieldSpecifiedTwice                           = 1110
+	ERInvalidGroupFuncUse                           = 1111
+	ERTableMustHaveColumns                          = 1113
+	ERUnknownCharacterSet                           = 1115
+	ERTooManyTables                                 = 1116
+	ERTooManyFields                                 = 1117
+	ERTooBigRowSize                                 = 1118
+	ERWrongOuterJoin                                = 1120
+	ERNullColumnInIndex                             = 1121
+	ERFunctionNotDefined                            = 1128
+	ERWrongValueCountOnRow                          = 1136
+	ERInvalidUseOfNull                              = 1138
+	ERRegexpError                                   = 1139
+	ERMixOfGroupFuncAndFields                       = 1140
+	ERIllegalGrantForTable                          = 1144
+	ERSyntaxError                                   = 1149
+	ERWrongColumnName                               = 1166
+	ERWrongKeyColumn                                = 1167
+	ERBlobKeyWithoutLength                          = 1170
+	ERPrimaryCantHaveNull                           = 1171
+	ERTooManyRows                                   = 1172
+	ERLockOrActiveTransaction                       = 1192
+	ERUnknownSystemVariable                         = 1193
+	ERSetConstantsOnly                              = 1204
+	ERWrongArguments                                = 1210
+	ERWrongUsage                                    = 1221
+	ERWrongNumberOfColumnsInSelect                  = 1222
+	ERDupArgument                                   = 1225
+	ERLocalVariable                                 = 1228
+	ERGlobalVariable                                = 1229
+	ERWrongValueForVar                              = 1231
+	ERWrongTypeForVar                               = 1232
+	ERVarCantBeRead                                 = 1233
+	ERCantUseOptionHere                             = 1234
+	ERIncorrectGlobalLocalVar                       = 1238
+	ERWrongFKDef                                    = 1239
+	ERKeyRefDoNotMatchTableRef                      = 1240
+	ERCyclicReference                               = 1245
+	ERIllegalReference                              = 1247
+	ERDerivedMustHaveAlias                          = 1248
+	ERTableNameNotAllowedHere                       = 1250
+	ERCollationCharsetMismatch                      = 1253
+	ERWarnDataTruncated                             = 1265
+	ERCantAggregate2Collations                      = 1267
+	ERCantAggregate3Collations                      = 1270
+	ERCantAggregateNCollations                      = 1271
+	ERVariableIsNotStruct                           = 1272
+	ERUnknownCollation                              = 1273
+	ERWrongNameForIndex                             = 1280
+	ERWrongNameForCatalog                           = 1281
+	ERBadFTColumn                                   = 1283
+	ERTruncatedWrongValue                           = 1292
+	ERTooMuchAutoTimestampCols                      = 1293
+	ERInvalidOnUpdate                               = 1294
+	ERUnknownTimeZone                               = 1298
+	ERInvalidCharacterString                        = 1300
+	ERQueryInterrupted                              = 1317
+	ERTruncatedWrongValueForField                   = 1366
+	ERIllegalValueForType                           = 1367
+	ERDataTooLong                                   = 1406
+	ErrWrongValueForType                            = 1411
+	ERForbidSchemaChange                            = 1450
+	ERWrongValue                                    = 1525
+	ERBase64DecodeError                             = 1575
+	ERNoFormatDescriptionEventBeforeBinlogStatement = 1609
+	ERDataOutOfRange                                = 1690
+	EROnlyFDAndRBREventsAllowedInBinlogStatement    = 1730
+	ERInvalidJSONText                               = 3140
+	ERInvalidJSONTextInParams                       = 3141
+	ERInvalidJSONBinaryData                         = 3142
+	ERInvalidJSONCharset                            = 3144
+	ERInvalidCastToJSON                             = 3147
+	ERJSONValueTooBig                               = 3150
+	ERJSONDocumentTooDeep                           = 3157
 
 	// max execution time exceeded
 	ERQueryTimeout = 3024
 
 	ErrCantCreateGeometryObject      = 1416
 	ErrGISDataWrongEndianess         = 3055
+	ErrUnresolvedTableLock           = 3568
 	ErrNotImplementedForCartesianSRS = 3704
 	ErrNotImplementedForProjectedSRS = 3705
 	ErrNonPositiveRadius             = 3706

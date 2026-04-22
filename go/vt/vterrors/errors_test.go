@@ -148,7 +148,7 @@ func TestWrapf(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := Wrapf(tt.err, tt.message).Error()
+		got := Wrapf(tt.err, "%s", tt.message).Error()
 		if got != tt.want {
 			t.Errorf("Wrapf(%v, %q): got: %v, want %v", tt.err, tt.message, got, tt.want)
 		}
@@ -299,7 +299,7 @@ func assertContains(t *testing.T, s, substring string, contains bool) {
 	}
 }
 
-func assertEquals(t *testing.T, a, b interface{}) {
+func assertEquals(t *testing.T, a, b any) {
 	if a != b {
 		t.Fatalf("expected [%s] to be equal to [%s]", a, b)
 	}

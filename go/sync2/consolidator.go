@@ -48,7 +48,7 @@ type Result struct {
 	executing    sync.RWMutex
 	consolidator *Consolidator
 	query        string
-	Result       interface{}
+	Result       any
 	Err          error
 }
 

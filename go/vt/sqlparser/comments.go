@@ -138,8 +138,11 @@ func StripLeadingComments(sql string) string {
 			if index <= 1 {
 				return sql
 			}
-			// don't strip /*! ... */ or /*!50700 ... */
+			// don't strip /*! ... */ or /*!50700 ... */ (MySQL) or /*M! ... */ (MariaDB)
 			if len(sql) > 2 && sql[2] == '!' {
+				return sql
+			}
+			if len(sql) > 3 && sql[2] == 'M' && sql[3] == '!' {
 				return sql
 			}
 			sql = sql[index+2:]
@@ -184,32 +187,16 @@ func StripComments(sql string) string {
 	return sql
 }
 
-// ExtractMysqlComment extracts the version and SQL from a comment-only query
-// such as /*!50708 sql here */
-func ExtractMysqlComment(sql string) (version string, innerSQL string) {
-	sql = sql[3 : len(sql)-2]
-
-	digitCount := 0
-	endOfVersionIndex := strings.IndexFunc(sql, func(c rune) bool {
-		digitCount++
-		return !unicode.IsDigit(c) || digitCount == 6
-	})
-	version = sql[0:endOfVersionIndex]
-	innerSQL = strings.TrimFunc(sql[endOfVersionIndex:], unicode.IsSpace)
-
-	return version, innerSQL
-}
-
 const commentDirectivePreamble = "/*vt+"
 
 // CommentDirectives is the parsed representation for execution directives
 // conveyed in query comments
-type CommentDirectives map[string]interface{}
+type CommentDirectives map[string]any
 
 // ExtractCommentDirectives parses the comment list for any execution directives
 // of the form:
 //
-//     /*vt+ OPTION_ONE=1 OPTION_TWO OPTION_THREE=abcd */
+//	/*vt+ OPTION_ONE=1 OPTION_TWO OPTION_THREE=abcd */
 //
 // It returns the map of the directive values or nil if there aren't any.
 func ExtractCommentDirectives(comments Comments) CommentDirectives {
@@ -217,7 +204,7 @@ func ExtractCommentDirectives(comments Comments) CommentDirectives {
 		return nil
 	}
 
-	var vals map[string]interface{}
+	var vals map[string]any
 
 	for _, comment := range comments {
 		commentStr := string(comment)
@@ -226,7 +213,7 @@ func ExtractCommentDirectives(comments Comments) CommentDirectives {
 		}
 
 		if vals == nil {
-			vals = make(map[string]interface{})
+			vals = make(map[string]any)
 		}
 
 		// Split on whitespace and ignore the first and last directive

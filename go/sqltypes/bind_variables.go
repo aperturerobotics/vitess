@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"time"
 
@@ -40,7 +41,7 @@ func ProtoToValue(v *querypb.Value) Value {
 }
 
 // BuildBindVariables builds a map[string]*querypb.BindVariable from a map[string]interface{}.
-func BuildBindVariables(in map[string]interface{}) (map[string]*querypb.BindVariable, error) {
+func BuildBindVariables(in map[string]any) (map[string]*querypb.BindVariable, error) {
 	if len(in) == 0 {
 		return nil, nil
 	}
@@ -97,7 +98,7 @@ func ValueBindVariable(v Value) *querypb.BindVariable {
 }
 
 // BuildBindVariable builds a *querypb.BindVariable from a valid input type.
-func BuildBindVariable(v interface{}) (*querypb.BindVariable, error) {
+func BuildBindVariable(v any) (*querypb.BindVariable, error) {
 	switch v := v.(type) {
 	case string:
 		return StringBindVariable(v), nil
@@ -137,7 +138,7 @@ func BuildBindVariable(v interface{}) (*querypb.BindVariable, error) {
 		return ValueBindVariable(v), nil
 	case *querypb.BindVariable:
 		return v, nil
-	case []interface{}:
+	case []any:
 		bv := &querypb.BindVariable{
 			Type:   querypb.Type_TUPLE,
 			Values: make([]*querypb.Value, len(v)),
@@ -283,9 +284,7 @@ func BindVariablesEqual(x, y map[string]*querypb.BindVariable) bool {
 // CopyBindVariables returns a shallow-copy of the given bindVariables map.
 func CopyBindVariables(bindVariables map[string]*querypb.BindVariable) map[string]*querypb.BindVariable {
 	result := make(map[string]*querypb.BindVariable, len(bindVariables))
-	for key, value := range bindVariables {
-		result[key] = value
-	}
+	maps.Copy(result, bindVariables)
 	return result
 }
 

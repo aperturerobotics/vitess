@@ -293,6 +293,7 @@ func (c *Conn) clientHandshake(params *ConnParams) error {
 
 		conn := tlsConn
 		c.Conn = conn
+		c.bufferedReader.Reset(conn)
 		c.Capabilities |= CapabilityClientSSL
 	}
 
@@ -560,10 +561,7 @@ func (c *Conn) parseInitialHandshakePacket(data []byte) (uint32, []byte, error) 
 	if capabilities&CapabilityClientSecureConnection != 0 {
 		// The next part of the auth-plugin-data.
 		// The length is max(13, length of auth-plugin-data - 8).
-		l := int(authPluginDataLength) - 8
-		if l > 13 {
-			l = 13
-		}
+		l := min(int(authPluginDataLength)-8, 13)
 		var authPluginDataPart2 []byte
 		authPluginDataPart2, pos, ok = readBytes(data, pos, l)
 		if !ok {
@@ -585,7 +583,7 @@ func (c *Conn) parseInitialHandshakePacket(data []byte) (uint32, []byte, error) 
 			// 5.6.2 that don't have a null terminated string.
 			authPluginName = string(data[pos : len(data)-1])
 		}
-		c.authPluginName = authPluginName
+		c.authPluginName = AuthMethodDescription(authPluginName)
 	}
 
 	return capabilities, authPluginData, nil
@@ -720,10 +718,11 @@ func (c *Conn) writeHandshakeResponse41(capabilities uint32, scrambledPassword [
 	}
 
 	// Auth plugin name
-	pos = writeNullString(data, pos, c.authPluginName)
+	pos = writeNullString(data, pos, string(c.authPluginName))
 
 	// Sanity-check the length.
 	if pos != len(data) {
+		c.recycleWritePacket()
 		return NewSQLError(CRMalformedPacket, SSUnknownSQLState, "writeHandshakeResponse41: only packed %v bytes, out of %v allocated", pos, len(data))
 	}
 
@@ -733,7 +732,7 @@ func (c *Conn) writeHandshakeResponse41(capabilities uint32, scrambledPassword [
 	return nil
 }
 
-func parseAuthSwitchRequest(data []byte) (string, []byte, error) {
+func parseAuthSwitchRequest(data []byte) (AuthMethodDescription, []byte, error) {
 	pos := 1
 	pluginName, pos, ok := readNullString(data, pos)
 	if !ok {
@@ -745,7 +744,7 @@ func parseAuthSwitchRequest(data []byte) (string, []byte, error) {
 	if len(salt) > 20 {
 		salt = salt[:20]
 	}
-	return pluginName, salt, nil
+	return AuthMethodDescription(pluginName), salt, nil
 }
 
 // requestPublicKey requests a public key from the server
@@ -790,6 +789,7 @@ func (c *Conn) writeClearTextPassword(params *ConnParams) error {
 	pos = writeNullString(data, pos, params.Pass)
 	// Sanity check.
 	if pos != len(data) {
+		c.recycleWritePacket()
 		return vterrors.Errorf(vtrpcpb.Code_INTERNAL, "error building ClearTextPassword packet: got %v bytes expected %v", pos, len(data))
 	}
 	return c.writeEphemeralPacket()
@@ -803,6 +803,7 @@ func (c *Conn) writeScrambledPassword(scrambledPassword []byte) error {
 	pos += copy(data[pos:], scrambledPassword)
 	// Sanity check.
 	if pos != len(data) {
+		c.recycleWritePacket()
 		return vterrors.Errorf(vtrpcpb.Code_INTERNAL, "error building %v packet: got %v bytes expected %v", c.authPluginName, pos, len(data))
 	}
 	return c.writeEphemeralPacket()

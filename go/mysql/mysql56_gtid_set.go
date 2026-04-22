@@ -107,7 +107,7 @@ func ParseMysql56GTIDSet(s string) (GTIDSet, error) {
 	set := Mysql56GTIDSet{}
 
 	// gtid_set: uuid_set [, uuid_set] ...
-	for _, uuidSet := range strings.Split(s, ",") {
+	for uuidSet := range strings.SplitSeq(s, ",") {
 		uuidSet = strings.TrimSpace(uuidSet)
 		if uuidSet == "" {
 			continue
@@ -274,7 +274,7 @@ func (set Mysql56GTIDSet) Subtract(arg GTIDSet) GTIDSet {
 			rightIntervals := other[sid]
 			for _, leftInterval := range leftIntervals {
 				found := false
-				for rightIntervalsIdx := 0; rightIntervalsIdx < len(rightIntervals); rightIntervalsIdx++ {
+				for rightIntervalsIdx := range rightIntervals {
 					rightInterval := rightIntervals[rightIntervalsIdx]
 					if leftInterval.overlaps(rightInterval) {
 						found = true
@@ -431,14 +431,19 @@ func (set Mysql56GTIDSet) SIDBlock() []byte {
 // This is the reverse of the SIDBlock method.
 //
 // Expected format:
-//   # bytes field
-//   8       nSIDs
+//
+//	# bytes field
+//	8       nSIDs
+//
 // (nSIDs times)
-//   16      SID
-//   8       nIntervals
+//
+//	16      SID
+//	8       nIntervals
+//
 // (nIntervals times)
-//   8       start
-//   8       end
+//
+//	8       start
+//	8       end
 func NewMysql56GTIDSetFromSIDBlock(data []byte) (Mysql56GTIDSet, error) {
 	buf := bytes.NewReader(data)
 	var set Mysql56GTIDSet = make(map[SID][]interval)

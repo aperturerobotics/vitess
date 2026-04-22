@@ -38,7 +38,7 @@ func NewSemaphore(count int, timeout time.Duration) *Semaphore {
 		slots:   make(chan struct{}, count),
 		timeout: timeout,
 	}
-	for i := 0; i < count; i++ {
+	for range count {
 		sem.slots <- struct{}{}
 	}
 	return sem

@@ -48,7 +48,7 @@ func (c *Conn) WriteComQuery(query string) error {
 	data[0] = ComQuery
 	copy(data[1:], query)
 	if err := c.writeEphemeralPacket(); err != nil {
-		return NewSQLError(CRServerGone, SSUnknownSQLState, err.Error())
+		return NewSQLError(CRServerGone, SSUnknownSQLState, SingleStringElementFormatString, err.Error())
 	}
 	return nil
 }
@@ -61,7 +61,7 @@ func (c *Conn) writeComInitDB(db string) error {
 	data[0] = ComInitDB
 	copy(data[1:], db)
 	if err := c.writeEphemeralPacket(); err != nil {
-		return NewSQLError(CRServerGone, SSUnknownSQLState, err.Error())
+		return NewSQLError(CRServerGone, SSUnknownSQLState, SingleStringElementFormatString, err.Error())
 	}
 	return nil
 }
@@ -73,7 +73,7 @@ func (c *Conn) writeComSetOption(operation uint16) error {
 	data[0] = ComSetOption
 	writeUint16(data, 1, operation)
 	if err := c.writeEphemeralPacket(); err != nil {
-		return NewSQLError(CRServerGone, SSUnknownSQLState, err.Error())
+		return NewSQLError(CRServerGone, SSUnknownSQLState, SingleStringElementFormatString, err.Error())
 	}
 	return nil
 }
@@ -256,7 +256,7 @@ func (c *Conn) parseRow(data []byte, fields []*querypb.Field) ([]sqltypes.Value,
 	colNumber := len(fields)
 	result := make([]sqltypes.Value, colNumber)
 	pos := 0
-	for i := 0; i < colNumber; i++ {
+	for i := range colNumber {
 		if data[pos] == NullValue {
 			pos++
 			continue
@@ -370,7 +370,7 @@ func (c *Conn) ReadQueryResult(ctx context.Context, maxrows int, wantfields bool
 
 	// Read column headers. One packet per column.
 	// Build the fields.
-	for i := 0; i < numCols; i++ {
+	for i := range numCols {
 		result.Fields[i] = &fields[i]
 		if wantfields {
 			if err := c.readColumnDefinition(ctx, result.Fields[i], i); err != nil {
@@ -933,7 +933,11 @@ func (c *Conn) parseComStmtSendLongData(data []byte) (uint32, uint16, []byte, bo
 		return 0, 0, nil, false
 	}
 
-	return statementID, paramID, data[pos:], true
+	chunkData := data[pos:]
+	chunk := make([]byte, len(chunkData))
+	copy(chunk, chunkData)
+
+	return statementID, paramID, chunk, true
 }
 
 func (c *Conn) parseComStmtClose(data []byte) (uint32, bool) {
@@ -1017,6 +1021,7 @@ func (c *Conn) writeColumnDefinition(field *querypb.Field, withDefaults bool) er
 	}
 
 	if pos != len(data) {
+		c.recycleWritePacket()
 		return vterrors.Errorf(vtrpc.Code_INTERNAL, "packing of column definition used %v bytes instead of %v", pos, len(data))
 	}
 
@@ -1047,6 +1052,7 @@ func (c *Conn) writeRow(row []sqltypes.Value) error {
 	}
 
 	if pos != length {
+		c.recycleWritePacket()
 		return vterrors.Errorf(vtrpc.Code_INTERNAL, "packet row: got %v bytes but expected %v", pos, length)
 	}
 
@@ -1152,7 +1158,7 @@ func (c *Conn) writePrepare(ctx context.Context, fld []*querypb.Field, prepare *
 	}
 
 	if paramsCount > 0 {
-		for i := uint16(0); i < paramsCount; i++ {
+		for range paramsCount {
 			if err := c.writeColumnDefinition(&querypb.Field{
 				Name:    "?",
 				Type:    sqltypes.VarBinary,
@@ -1211,7 +1217,7 @@ func (c *Conn) writeBinaryRow(fields []*querypb.Field, row []sqltypes.Value) err
 
 	pos = writeByte(data, pos, 0x00)
 
-	for i := 0; i < nullBitMapLen; i++ {
+	for range nullBitMapLen {
 		pos = writeByte(data, pos, 0x00)
 	}
 
@@ -1231,6 +1237,7 @@ func (c *Conn) writeBinaryRow(fields []*querypb.Field, row []sqltypes.Value) err
 	}
 
 	if pos != length {
+		c.recycleWritePacket()
 		return fmt.Errorf("internal error packet row: got %v bytes but expected %v", pos, length)
 	}
 
@@ -1544,7 +1551,7 @@ func val2MySQL(v sqltypes.Value) ([]byte, error) {
 		}
 	case sqltypes.Decimal, sqltypes.Text, sqltypes.Blob, sqltypes.VarChar,
 		sqltypes.VarBinary, sqltypes.Char, sqltypes.Bit, sqltypes.Enum,
-		sqltypes.Set, sqltypes.Geometry, sqltypes.Binary, sqltypes.TypeJSON:
+		sqltypes.Set, sqltypes.Geometry, sqltypes.Binary, sqltypes.TypeJSON, sqltypes.Vector:
 		l := len(v.Raw())
 		length := lenEncIntSize(uint64(l)) + l
 		out = make([]byte, length)
@@ -1594,7 +1601,7 @@ func val2MySQLLen(v sqltypes.Value) (int, error) {
 		}
 	case sqltypes.Decimal, sqltypes.Text, sqltypes.Blob, sqltypes.VarChar,
 		sqltypes.VarBinary, sqltypes.Char, sqltypes.Bit, sqltypes.Enum,
-		sqltypes.Set, sqltypes.Geometry, sqltypes.Binary, sqltypes.TypeJSON:
+		sqltypes.Set, sqltypes.Geometry, sqltypes.Binary, sqltypes.TypeJSON, sqltypes.Vector:
 		l := len(v.Raw())
 		length = lenEncIntSize(uint64(l)) + l
 	default:

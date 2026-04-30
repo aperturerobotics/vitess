@@ -21,7 +21,6 @@ package sqlparser
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -7788,13 +7787,12 @@ func (node ColIdent) EqualString(str string) bool {
 
 // MarshalJSON marshals into JSON.
 func (node ColIdent) MarshalJSON() ([]byte, error) {
-	return json.Marshal(node.val)
+	return strconv.AppendQuote(nil, node.val), nil
 }
 
 // UnmarshalJSON unmarshals from JSON.
 func (node *ColIdent) UnmarshalJSON(b []byte) error {
-	var result string
-	err := json.Unmarshal(b, &result)
+	result, err := strconv.Unquote(string(b))
 	if err != nil {
 		return err
 	}
@@ -7839,13 +7837,12 @@ func (node TableFuncExpr) CompliantName() string {
 
 // MarshalJSON marshals into JSON.
 func (node TableFuncExpr) MarshalJSON() ([]byte, error) {
-	return json.Marshal(node.Name)
+	return strconv.AppendQuote(nil, node.Name), nil
 }
 
 // UnmarshalJSON unmarshals from JSON.
 func (node *TableFuncExpr) UnmarshalJSON(b []byte) error {
-	var result string
-	err := json.Unmarshal(b, &result)
+	result, err := strconv.Unquote(string(b))
 	if err != nil {
 		return err
 	}
@@ -7899,13 +7896,12 @@ func (node TableIdent) CompliantName() string {
 
 // MarshalJSON marshals into JSON.
 func (node TableIdent) MarshalJSON() ([]byte, error) {
-	return json.Marshal(node.v)
+	return strconv.AppendQuote(nil, node.v), nil
 }
 
 // UnmarshalJSON unmarshals from JSON.
 func (node *TableIdent) UnmarshalJSON(b []byte) error {
-	var result string
-	err := json.Unmarshal(b, &result)
+	result, err := strconv.Unquote(string(b))
 	if err != nil {
 		return err
 	}

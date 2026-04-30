@@ -16,11 +16,7 @@ limitations under the License.
 
 package sqltypes
 
-import (
-	"reflect"
-
-	querypb "github.com/dolthub/vitess/go/vt/proto/query"
-)
+import querypb "github.com/dolthub/vitess/go/vt/proto/query"
 
 // Result represents a query result.
 type Result struct {
@@ -162,8 +158,25 @@ func (result *Result) Equal(other *Result) bool {
 	return FieldsEqual(result.Fields, other.Fields) &&
 		result.RowsAffected == other.RowsAffected &&
 		result.InsertID == other.InsertID &&
-		reflect.DeepEqual(result.Rows, other.Rows) &&
+		rowsEqual(result.Rows, other.Rows) &&
 		result.Extras.EqualVT(other.Extras)
+}
+
+func rowsEqual(a, b [][]Value) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if len(a[i]) != len(b[i]) {
+			return false
+		}
+		for j := range a[i] {
+			if a[i][j].typ != b[i][j].typ || string(a[i][j].val) != string(b[i][j].val) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // ResultsEqual compares two arrays of Result.

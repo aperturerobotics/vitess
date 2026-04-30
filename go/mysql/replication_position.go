@@ -17,8 +17,8 @@ limitations under the License.
 package mysql
 
 import (
-	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/dolthub/vitess/go/vt/proto/vtrpc"
@@ -152,13 +152,12 @@ func ParsePosition(flavor, value string) (rp Position, err error) {
 
 // MarshalJSON implements encoding/json.Marshaler.
 func (rp Position) MarshalJSON() ([]byte, error) {
-	return json.Marshal(EncodePosition(rp))
+	return strconv.AppendQuote(nil, EncodePosition(rp)), nil
 }
 
 // UnmarshalJSON implements encoding/json.Unmarshaler.
 func (rp *Position) UnmarshalJSON(buf []byte) error {
-	var s string
-	err := json.Unmarshal(buf, &s)
+	s, err := strconv.Unquote(string(buf))
 	if err != nil {
 		return err
 	}

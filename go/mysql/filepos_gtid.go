@@ -133,5 +133,5 @@ func (gtid filePosGTID) AddGTID(other GTID) GTIDSet {
 func init() {
 	gtidParsers[filePosFlavorID] = parseFilePosGTID
 	gtidSetParsers[filePosFlavorID] = parseFilePosGTIDSet
-	flavors[filePosFlavorID] = newFilePosFlavor
+	registerFilePosFlavor()
 }

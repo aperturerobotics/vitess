@@ -1,3 +1,5 @@
+//go:build !tinygo
+
 /*
 Copyright 2019 The Vitess Authors.
 
@@ -479,13 +481,9 @@ func (l *Listener) handle(ctx context.Context, conn net.Conn, connectionID uint3
 			return
 		}
 
-		if con, ok := c.Conn.(*tls.Conn); ok {
-			connState := con.ConnectionState()
-			tlsVerStr := tlsVersionToString(connState.Version)
-			if tlsVerStr != "" {
-				connCountByTLSVer.Add(tlsVerStr, 1)
-				defer connCountByTLSVer.Add(tlsVerStr, -1)
-			}
+		if tlsVerStr := tlsConnVersionString(c.Conn); tlsVerStr != "" {
+			connCountByTLSVer.Add(tlsVerStr, 1)
+			defer connCountByTLSVer.Add(tlsVerStr, -1)
 		}
 	} else {
 		if l.RequireSecureTransport {
@@ -849,9 +847,9 @@ func (l *Listener) parseClientHandshakePacket(c *Conn, firstTime bool, data []by
 	// Check for SSL.
 	if firstTime && l.TLSConfig != nil && clientFlags&CapabilityClientSSL > 0 {
 		// Need to switch to TLS, and then re-read the packet.
-		conn := tls.Server(c.Conn, l.TLSConfig)
-		c.Conn = conn
-		c.bufferedReader.Reset(conn)
+		if !upgradeServerTLS(c, l.TLSConfig) {
+			return "", "", nil, vterrors.Errorf(vtrpc.Code_UNAVAILABLE, "TLS is unsupported")
+		}
 		c.Capabilities |= CapabilityClientSSL
 		return "", "", nil, nil
 	}

@@ -25,7 +25,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/dolthub/vitess/go/sqltypes"
 
@@ -819,7 +818,7 @@ func checkQueryInternal(t *testing.T, query string, sConn, cConn *Conn, result *
 		}
 		if !got.Equal(&expected) {
 			for i, f := range got.Fields {
-				if i < len(expected.Fields) && !proto.Equal(f, expected.Fields[i]) {
+				if i < len(expected.Fields) && !f.EqualVT(expected.Fields[i]) {
 					t.Logf("Got      field(%v) = %v", i, f)
 					t.Logf("Expected field(%v) = %v", i, expected.Fields[i])
 				}
@@ -865,7 +864,7 @@ func checkQueryInternal(t *testing.T, query string, sConn, cConn *Conn, result *
 
 		if !got.Equal(&expected) {
 			for i, f := range got.Fields {
-				if i < len(expected.Fields) && !proto.Equal(f, expected.Fields[i]) {
+				if i < len(expected.Fields) && !f.EqualVT(expected.Fields[i]) {
 					t.Logf("========== Got      field(%v) = %v", i, f)
 					t.Logf("========== Expected field(%v) = %v", i, expected.Fields[i])
 				}
@@ -1131,7 +1130,7 @@ func TestExecuteQueries(t *testing.T) {
 	})
 }
 
-func TestComStmtPrepareWithTrailingNewLine (t *testing.T) {
+func TestComStmtPrepareWithTrailingNewLine(t *testing.T) {
 	listener, sConn, cConn := createSocketPair(t)
 	defer func() {
 		listener.Close()
@@ -1164,7 +1163,7 @@ func TestComStmtPrepareWithTrailingNewLine (t *testing.T) {
 	}
 }
 
-func TestComStmtPrepareMultiStmt (t *testing.T) {
+func TestComStmtPrepareMultiStmt(t *testing.T) {
 	listener, sConn, cConn := createSocketPair(t)
 	defer func() {
 		listener.Close()

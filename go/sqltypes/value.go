@@ -20,7 +20,6 @@ package sqltypes
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -293,7 +292,7 @@ func (v Value) IsBinary() bool {
 func (v Value) MarshalJSON() ([]byte, error) {
 	switch {
 	case v.IsQuoted() || v.typ == Bit:
-		return json.Marshal(v.ToString())
+		return strconv.AppendQuote(nil, v.ToString()), nil
 	case v.typ == Null:
 		return nullstr, nil
 	}
@@ -306,28 +305,32 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 	if len(b) == 0 {
 		return fmt.Errorf("error unmarshaling empty bytes")
 	}
-	var val interface{}
 	var err error
 	switch b[0] {
 	case '-':
-		var ival int64
-		err = json.Unmarshal(b, &ival)
-		val = ival
+		ival, err := strconv.ParseInt(string(b), 10, 64)
+		if err != nil {
+			return err
+		}
+		*v, err = InterfaceToValue(ival)
 	case '"':
-		var bval []byte
-		err = json.Unmarshal(b, &bval)
-		val = bval
+		s, err := strconv.Unquote(string(b))
+		if err != nil {
+			return err
+		}
+		*v, err = InterfaceToValue([]byte(s))
 	case 'n': // null
-		err = json.Unmarshal(b, &val)
+		if string(b) != "null" {
+			return fmt.Errorf("invalid null value %q", b)
+		}
+		*v = NULL
 	default:
-		var uval uint64
-		err = json.Unmarshal(b, &uval)
-		val = uval
+		uval, err := strconv.ParseUint(string(b), 10, 64)
+		if err != nil {
+			return err
+		}
+		*v, err = InterfaceToValue(uval)
 	}
-	if err != nil {
-		return err
-	}
-	*v, err = InterfaceToValue(val)
 	return err
 }
 

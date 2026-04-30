@@ -1,3 +1,5 @@
+//go:build !tinygo
+
 /*
 Copyright 2019 The Vitess Authors.
 
@@ -19,8 +21,6 @@ package mysql
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -1830,14 +1830,6 @@ func ParseErrorPacket(data []byte) error {
 	return NewSQLError(int(code), string(sqlState), "%v", msg)
 }
 
-// GetTLSClientCerts gets TLS certificates.
-func (c *Conn) GetTLSClientCerts() []*x509.Certificate {
-	if tlsConn, ok := c.Conn.(*tls.Conn); ok {
-		return tlsConn.ConnectionState().PeerCertificates
-	}
-	return nil
-}
-
 // TLSEnabled returns true if this connection is using TLS.
 func (c *Conn) TLSEnabled() bool {
 	return c.Capabilities&CapabilityClientSSL > 0
@@ -1845,6 +1837,5 @@ func (c *Conn) TLSEnabled() bool {
 
 // IsUnixSocket returns true if this connection is over a Unix socket.
 func (c *Conn) IsUnixSocket() bool {
-	_, ok := c.listener.listener.(*net.UnixListener)
-	return ok
+	return isUnixSocket(c.listener.listener)
 }

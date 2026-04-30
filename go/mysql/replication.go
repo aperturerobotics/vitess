@@ -1,3 +1,5 @@
+//go:build !tinygo
+
 /*
 Copyright 2019 The Vitess Authors.
 
@@ -92,7 +94,7 @@ func (c *Conn) WriteBinlogEvent(ev BinlogEvent, semiSyncEnabled bool) error {
 	//       0 to pos to indicate no header was included.
 	//data, pos := c.startEphemeralPacketWithHeader(len(ev.Bytes()) + extraBytes)
 
-	data, pos := c.startEphemeralPacket(len(ev.Bytes()) + extraBytes), 0
+	data, pos := c.startEphemeralPacket(len(ev.Bytes())+extraBytes), 0
 	pos = writeByte(data, pos, 0) // "OK" prefix
 	if semiSyncEnabled {
 		pos = writeByte(data, pos, 0xef) // semi sync indicator
@@ -104,4 +106,3 @@ func (c *Conn) WriteBinlogEvent(ev BinlogEvent, semiSyncEnabled bool) error {
 	}
 	return nil
 }
-

@@ -25,8 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"runtime/trace"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,7 +120,7 @@ func Parse(sql string) (Statement, error) {
 // If a DDL statement is partially parsed but contains a syntax error, the
 // error is ignored and the DDL is returned anyway.
 func ParseWithOptions(ctx context.Context, sql string, options ParserOptions) (Statement, error) {
-	defer trace.StartRegion(ctx, "ParseWithOptions").End()
+	defer startParseRegion(ctx, "ParseWithOptions").End()
 
 	tokenizer := NewStringTokenizer(sql)
 	if options.AnsiQuotes {
@@ -143,7 +142,7 @@ func ParseOne(ctx context.Context, sql string) (Statement, int, error) {
 // the index of the start of the next statement in |sql|. If there was only one
 // statement in |sql|, the value of the returned index will be |len(sql)|.
 func ParseOneWithOptions(ctx context.Context, sql string, options ParserOptions) (Statement, int, error) {
-	defer trace.StartRegion(ctx, "ParseOneWithOptions").End()
+	defer startParseRegion(ctx, "ParseOneWithOptions").End()
 
 	tokenizer := NewStringTokenizer(sql)
 	if options.AnsiQuotes {
@@ -3071,7 +3070,7 @@ func (ct *ColumnType) merge(other ColumnType) error {
 
 	if other.KeyOpt != colKeyNone {
 		keyOptions := []ColumnKeyOption{ct.KeyOpt, other.KeyOpt}
-		sort.Slice(keyOptions, func(i, j int) bool { return keyOptions[i] < keyOptions[j] })
+		slices.Sort(keyOptions)
 		if other.KeyOpt == ct.KeyOpt {
 			// MySQL will deduplicate key options when they are repeated.
 		} else if keyOptions[0] == colKeyPrimary && (keyOptions[1] == colKeyUnique || keyOptions[1] == colKeyUniqueKey) {

@@ -17,8 +17,8 @@ limitations under the License.
 package sqlparser
 
 import (
-	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/dolthub/vitess/go/sqltypes"
@@ -89,7 +89,7 @@ func (pq *ParsedQuery) Append(buf *strings.Builder, bindVariables map[string]*qu
 // MarshalJSON is a custom JSON marshaler for ParsedQuery.
 // Note that any queries longer that 512 bytes will be truncated.
 func (pq *ParsedQuery) MarshalJSON() ([]byte, error) {
-	return json.Marshal(TruncateForUI(pq.Query))
+	return strconv.AppendQuote(nil, TruncateForUI(pq.Query)), nil
 }
 
 // EncodeValue encodes one bind variable value into the query.

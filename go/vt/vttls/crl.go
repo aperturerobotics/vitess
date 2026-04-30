@@ -1,3 +1,5 @@
+//go:build !tinygo
+
 /*
 Copyright 2021 The Vitess Authors.
 

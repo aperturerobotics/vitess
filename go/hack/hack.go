@@ -18,10 +18,7 @@ limitations under the License.
 // breaking some Go rules.
 package hack
 
-import (
-	"reflect"
-	"unsafe"
-)
+import "unsafe"
 
 // String force casts a []byte to a string.
 // USE AT YOUR OWN RISK
@@ -34,6 +31,5 @@ func String(b []byte) (s string) {
 
 // StringPointer returns &s[0], which is not allowed in go
 func StringPointer(s string) unsafe.Pointer {
-	pstring := (*reflect.StringHeader)(unsafe.Pointer(&s))
-	return unsafe.Pointer(pstring.Data)
+	return unsafe.Pointer(unsafe.StringData(s))
 }

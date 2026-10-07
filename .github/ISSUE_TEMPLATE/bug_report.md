@@ -16,36 +16,37 @@ Steps to reproduce this issue, example:
 
 1. Deploy the following `vschema`:
 
-    ```javascript
-    {
-      "sharded": true,
-      "vindexes": {
-        "hash": {
-          "type": "hash"
-        },
-      "tables": {
-        "user": {
-          "column_vindexes": [
-            {
-              "column": "user_id",
-              "name": "hash"
-            }
-          ]
-        }
-      }
-    }
-    ```
+   ```javascript
+   {
+     "sharded": true,
+     "vindexes": {
+       "hash": {
+         "type": "hash"
+       },
+     "tables": {
+       "user": {
+         "column_vindexes": [
+           {
+             "column": "user_id",
+             "name": "hash"
+           }
+         ]
+       }
+     }
+   }
+   ```
 
 1. Deploy the following `schema`:
 
-    ```sql
-    create table user(user_id bigint, name varchar(128), primary key(user_id));
-    ```
+   ```sql
+   create table user(user_id bigint, name varchar(128), primary key(user_id));
+   ```
 
 1. Run `SELECT...`
 1. View error
 
 #### Binary version
+
 Example:
 
 ```sh

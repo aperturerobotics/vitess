@@ -232,6 +232,9 @@ type PrepareData struct {
 	PrepareStmt string
 	ParamsCount uint16
 	ParamsType  []int32
+	// ParamFields describes each parameter in the prepare response, in order.
+	// A missing entry is sent as VARBINARY.
+	ParamFields []*querypb.Field
 	ColumnNames []string
 	BindVars    map[string]*querypb.BindVariable
 }

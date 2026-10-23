@@ -1161,10 +1161,11 @@ func (c *Conn) writePrepare(ctx context.Context, fld []*querypb.Field, prepare *
 
 	if paramsCount > 0 {
 		for i := uint16(0); i < paramsCount; i++ {
-			if err := c.writeColumnDefinition(&querypb.Field{
-				Name:    "?",
-				Type:    sqltypes.VarBinary,
-				Charset: 63}, false); err != nil {
+			field := &querypb.Field{Name: "?", Type: sqltypes.VarBinary, Charset: 63}
+			if int(i) < len(prepare.ParamFields) && prepare.ParamFields[i] != nil {
+				field = prepare.ParamFields[i]
+			}
+			if err := c.writeColumnDefinition(field, false); err != nil {
 				return err
 			}
 		}

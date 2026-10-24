@@ -1195,3 +1195,47 @@ func TestComStmtPrepareMultiStmt(t *testing.T) {
 		return
 	}
 }
+
+// TestColumnDefinitionKeepsTypeFlags checks that a column's own flags, such as
+// NOT NULL, do not drop the flags its type implies, so the client reads the
+// same type back.
+func TestColumnDefinitionKeepsTypeFlags(t *testing.T) {
+	listener, sConn, cConn := createSocketPair(t)
+	defer func() {
+		listener.Close()
+		sConn.Close()
+		cConn.Close()
+	}()
+
+	for _, typ := range []querypb.Type{
+		querypb.Type_ENUM,
+		querypb.Type_SET,
+		querypb.Type_VARBINARY,
+		querypb.Type_BLOB,
+		querypb.Type_INT64,
+	} {
+		// Write a NOT NULL column of the type and read it back.
+		sent := &querypb.Field{
+			Name:         "c",
+			Type:         typ,
+			Charset:      63,
+			ColumnLength: 10,
+			Flags:        uint32(querypb.MySqlFlag_NOT_NULL_FLAG),
+		}
+		if err := sConn.writeColumnDefinition(sent, false); err != nil {
+			t.Fatalf("%v: write: %v", typ, err)
+		}
+		got := &querypb.Field{}
+		if err := cConn.readColumnDefinition(context.Background(), got, 0); err != nil {
+			t.Fatalf("%v: read: %v", typ, err)
+		}
+
+		// The type and NOT NULL both survive.
+		if got.Type != typ {
+			t.Errorf("type: got %v, want %v", got.Type, typ)
+		}
+		if got.Flags&uint32(querypb.MySqlFlag_NOT_NULL_FLAG) == 0 {
+			t.Errorf("%v: NOT NULL flag lost", typ)
+		}
+	}
+}

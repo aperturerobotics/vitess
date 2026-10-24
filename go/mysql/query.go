@@ -993,13 +993,12 @@ func (c *Conn) writeColumnDefinition(field *querypb.Field, withDefaults bool) er
 		length += lenEncStringSize(defaultVal)
 	}
 
-	// Get the type and the flags back. If the Field contains
-	// non-zero flags, we use them. Otherwise use the flags we
-	// derive from the type.
+	// Get the type and the flags it implies, such as ENUM or BINARY, and add
+	// the Field's own flags. A client tells ENUM, SET and binary columns from
+	// plain strings only by those type flags, so a Field's NOT NULL must not
+	// replace them.
 	typ, flags := sqltypes.TypeToMySQL(field.Type)
-	if field.Flags != 0 {
-		flags = int64(field.Flags)
-	}
+	flags |= int64(field.Flags)
 
 	data := c.startEphemeralPacket(length)
 	pos := 0
